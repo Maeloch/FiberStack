@@ -37,7 +37,11 @@ import pybullet as p
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 4
+CODE_VERSION = 6          # entier obligatoire : int(code_version) comparé
+                          # au chargement ; une décimale casserait le contrôle
+
+N_FIBERS = 1000
+SEED = 1
 
 FILTER_THICKNESS = 0.3        # mm (300 µm, cible finale)
 
@@ -286,12 +290,12 @@ def resume_pile(client, npz_path):
 
 def build_pile(n_fibers, seed=0, verbose=True, resume_npz=None):
     client = p.connect(p.DIRECT)
-    p.setGravity(0, 0, -9.81e-3, physicsClientId=client)  # mm/ms²
+    p.setGravity(0, 0, -9.81e-3, physicsClientId=client)
     p.setPhysicsEngineParameter(fixedTimeStep=DT, numSubSteps=NUM_SUBSTEPS,
                                 numSolverIterations=50, physicsClientId=client)
 
     half = DOMAIN_SIDE / 2.0
-    half_floor = 2.0 * half            # plancher 2x le domaine
+    half_floor = 2.0 * half
     floor_col = p.createCollisionShape(p.GEOM_BOX,
                                        halfExtents=[half_floor, half_floor, 1e-2],
                                        physicsClientId=client)
@@ -314,54 +318,69 @@ def build_pile(n_fibers, seed=0, verbose=True, resume_npz=None):
     else:
         fibers, max_h, n_core = [], 0.0, 0
 
-    n_ejected = 0
-    n_not_settled = 0
+    n_ejected = 0      # perdues après 2 tentatives (éjection/explosion/plancher)
+    n_retried = 0      # tentatives relancées (1re tentative ratée)
+    n_abandoned = 0    # fibres abandonnées après 2 tentatives
     t_start = time.perf_counter()
     t_mark = t_start
     for i in range(n_fibers):
         radius = diameters[i] / 2.0
         length = lengths[i]
         xy = rng.uniform(-half, half, size=2)
-        # axe horizontal, azimut uniforme : une fibre qui tombe dans une
-        # suspension descend à plat, pas bout en premier.
         phi = rng.uniform(0, 2 * np.pi)
         direction = np.array([np.cos(phi), np.sin(phi), 0.0])
 
-        # départ par raycast de l'ombre, au lieu de max_h
-        z_start = place_fiber(client, xy, direction, radius, length, max_h)
+        attempt = 0
+        while True:
+            z_start = place_fiber(client, xy, direction, radius, length, max_h)
+            result = drop_fiber(client, xy, z_start, direction,
+                                radius=radius, length=length,
+                                fall_steps=FALL_MAX_STEPS)
+            attempt += 1
 
-        result = drop_fiber(client, xy, z_start, direction,
-                            radius=radius, length=length,
-                            fall_steps=FALL_MAX_STEPS)
-        if result is None or result[0] is None:
-            n_ejected += 1
-            if verbose:
+            # --- cas pathologique : perdue OU aucun contact OU pas au repos
+            pathological = (result is None or result[0] is None)
+            if not pathological:
+                body, pos, dirf, found, used = result
+                if not found or used >= STICK_MAX_STEPS:
+                    pathological = True
+
+            if pathological:
+                # retirer le corps : drop_fiber l'a déjà fait pour les
+                # pertes ; sinon (gelé en vol), on le fait ici
+                if result is not None and result[0] is not None:
+                    p.removeBody(result[0], physicsClientId=client)
+                if attempt == 1:
+                    n_retried += 1
+                    if verbose and not found:
+                        print(f"fibre {i:4d}  <-- AUCUN CONTACT : redéposée")
+                    elif verbose and result is not None and result[0] is not None:
+                        print(f"fibre {i:4d}  <-- PAS AU REPOS : redéposée")
+                    xy = rng.uniform(-half, half, size=2)
+                    continue
+                # 2e échec : abandonnée, PAS ajoutée au tas
+                if result is not None and result[0] is None:
+                    n_ejected += 1      # éjection/explosion/plancher
+                else:
+                    n_abandoned += 1    # non-repos ou sans contact
+                if verbose:
+                    print(f"fibre {i:4d}  d={diameters[i]*1e3:5.2f}um  "
+                          f"L={length:5.3f}mm  <-- ABANDONNÉE (2 échecs)")
+                break
+
+            # --- dépôt réussi
+            top = pos[2] + length / 2 + radius
+            max_h = max(max_h, top)
+            core = (abs(pos[0]) <= MEASURE_SIDE / 2) and (abs(pos[1]) <= MEASURE_SIDE / 2)
+            n_core += core
+            fibers.append(dict(center=pos, direction=dirf, length=length,
+                               radius=radius, core=core))
+            if verbose and (i % 20 == 0):
                 print(f"fibre {i:4d}  d={diameters[i]*1e3:5.2f}um  "
-                      f"L={length:5.3f}mm  <-- PERDUE, ignorée")
-            continue
-        body, pos, dirf, found, used = result
+                      f"L={length:5.3f}mm  pas_stab={used:5d}  "
+                      f"pos_z={pos[2]:7.4f}mm  max_h={max_h:7.4f}mm  core={core}")
+            break
 
-        top = pos[2] + length / 2 + radius
-        max_h = max(max_h, top)
-        core = (abs(pos[0]) <= MEASURE_SIDE / 2) and (abs(pos[1]) <= MEASURE_SIDE / 2)
-        n_core += core
-        fibers.append(dict(center=pos, direction=dirf, length=length,
-                           radius=radius, core=core))
-        not_settled = found and used >= STICK_MAX_STEPS
-        if not_settled:
-            n_not_settled += 1
-        if verbose and (i % 20 == 0 or not found or not_settled):
-            if not found:
-                flag = "  <-- AUCUN CONTACT"
-            elif not_settled:
-                flag = "  <-- PAS AU REPOS (plafond atteint)"
-            else:
-                flag = ""
-            print(f"fibre {i:4d}  d={diameters[i]*1e3:5.2f}um  "
-                  f"L={length:5.3f}mm  pas_stab={used:5d}  "
-                  f"pos_z={pos[2]:7.4f}mm  max_h={max_h:7.4f}mm  "
-                  f"core={core}{flag}")
-        # chrono : le coût par fibre doit rester ~constant maintenant
         if verbose and (i + 1) % 100 == 0:
             t_now = time.perf_counter()
             dt_chunk = t_now - t_mark
@@ -372,13 +391,13 @@ def build_pile(n_fibers, seed=0, verbose=True, resume_npz=None):
 
     if verbose:
         print(f"=== {len(fibers)} fibres déposées "
-              f"({n_ejected} perdues, {n_not_settled} non-repos), "
+              f"({n_retried} relancées, {n_ejected} perdues, "
+              f"{n_abandoned} abandonnées), "
               f"{n_core} en zone de mesure ({MEASURE_SIDE:.2f} mm de côté), "
               f"hauteur {max_h:.4f} mm, "
               f"{time.perf_counter()-t_start:.1f} s ===")
     p.disconnect(physicsClientId=client)
     return fibers
-
 
 # ------------------------------------------------------------ export & contrôle
 
@@ -389,7 +408,7 @@ def export_npz(fibers, path="pile.npz"):
              lengths=np.array([f["length"] for f in fibers]),
              radii=np.array([f["radius"] for f in fibers]),
              core=np.array([f["core"] for f in fibers]),
-             code_version=CODE_VERSION)
+             code_version=CODE_VERSION, seed=SEED, n_total=N_FIBERS)
 
 
 def check_penetration(fibers, cell=0.5):
@@ -528,14 +547,10 @@ def plot_fibers(fibers, save_path=None, n_sides=8, core_only=False):
 # ------------------------------------------------------------ main
 
 if __name__ == "__main__":
-    # 1) Validation : 1000 fibres, même seed que pile_0.npz (settle_si3,
-    #    chute complète) : orientation, profil de porosité, occupation
-    #    surfacique doivent se superposer. Le chrono doit être ~constant.
-    # 2) Campagne par lots, seed différent à chaque lot :
-    #    lot n : build_pile(10000, seed=n, resume_npz="pile_lot{n-1}.npz")
-    #    -> export "pile_lot{n}.npz"
-    fibers = build_pile(n_fibers=1000, seed=0)
-    export_npz(fibers, "pile_v4.npz")
+    # 1) Validation : 1000 fibres, comparer à pile_0.npz / pile.npz.
+    # 2) Campagne par lots : seed différent à chaque lot, reprise npz.
+    fibers = build_pile(n_fibers=N_FIBERS, seed=SEED)
+    export_npz(fibers, f"pile_{N_FIBERS}_{SEED}.npz")
     check_penetration(fibers, cell=0.5)
-    plot_fibers(fibers, save_path="pile_v4.png")
+    plot_fibers(fibers, save_path=f"pile_{N_FIBERS}_{SEED}.png")
     print("=== terminé ===")
