@@ -401,14 +401,15 @@ def build_pile(n_fibers, seed=0, verbose=True, resume_npz=None):
 
 # ------------------------------------------------------------ export & contrôle
 
-def export_npz(fibers, path="pile.npz"):
+def export_npz(fibers, path="pile.npz", seed=None, n_total=None):
     np.savez(path,
              centers=np.array([f["center"] for f in fibers]),
              directions=np.array([f["direction"] for f in fibers]),
              lengths=np.array([f["length"] for f in fibers]),
              radii=np.array([f["radius"] for f in fibers]),
              core=np.array([f["core"] for f in fibers]),
-             code_version=CODE_VERSION, seed=SEED, n_total=N_FIBERS)
+             code_version=CODE_VERSION,
+             seed=seed, n_total=n_total)
 
 
 def check_penetration(fibers, cell=0.5):
@@ -550,7 +551,8 @@ if __name__ == "__main__":
     # 1) Validation : 1000 fibres, comparer à pile_0.npz / pile.npz.
     # 2) Campagne par lots : seed différent à chaque lot, reprise npz.
     fibers = build_pile(n_fibers=N_FIBERS, seed=SEED)
-    export_npz(fibers, f"pile_{N_FIBERS}_{SEED}.npz")
+    export_npz(fibers, f"pile_{N_FIBERS}_{SEED}.npz",
+               seed=SEED, n_total=N_FIBERS)
     check_penetration(fibers, cell=0.5)
     plot_fibers(fibers, save_path=f"pile_{N_FIBERS}_{SEED}.png")
     print("=== terminé ===")

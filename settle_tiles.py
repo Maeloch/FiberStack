@@ -119,7 +119,8 @@ def run_tile(args):
     for i in range(n_tile):
         radius = diameters[i] / 2.0
         length = lengths[i]
-        xy = rng.uniform(x0, x1, size=2)
+#        xy = rng.uniform(x0, x1, size=2)
+        xy = np.array([rng.uniform(x0, x1), rng.uniform(y0, y1)])
         phi = rng.uniform(0, 2 * np.pi)
         direction = np.array([np.cos(phi), np.sin(phi), 0.0])
 
@@ -140,7 +141,8 @@ def run_tile(args):
                     p.removeBody(result[0], physicsClientId=client)
                 if attempt == 1:
                     n_retried += 1
-                    xy = rng.uniform(x0, x1, size=2)
+#                    xy = rng.uniform(x0, x1, size=2)
+                    xy = np.array([rng.uniform(x0, x1), rng.uniform(y0, y1)])
                     continue
                 if result is None or result[0] is None:
                     n_ejected += 1
