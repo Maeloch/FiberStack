@@ -10,6 +10,32 @@ Deux routes :
      phase liquide de fabrication : fibres réparties dans un volume,
      puis pressées — pas de dépôt gravitaire du tout).
 
+v2.5 — TROIS FERMETURES DU DOSSIER PHASE DENSE :
+     (1) NARCOLEPSIE : sleepThreshold=0 à la création de chaque fibre
+     (make_fiber_body). Le correctif prescrit au diagnostic des
+     fibres fantômes n'était JAMAIS ENTRÉ dans press.py — seul
+     pressmt.py l'appliquait : les monolithes seed 0, seed 2 et le
+     10000 explosé ont été pressés sans lui. Un corps endormi ignore
+     la gravité et vote « repos » sans bouger.
+     (2) SILENCE : QUATRE contrôles consécutifs sous VQUIET au lieu
+     d'un contrôle isolé tous les 500 pas — une chute libre partant
+     du repos franchit VQUIET en ~510 pas (v = g·t), un sondage
+     isolé peut tomber dans l'accélération (le run 10000 a exporté
+     des fibres mi-chute ; le « repos à 5500 » du certification run
+     n'était qu'un sondage instantané).
+     (3) ÉCLAT : la pause DÉRIVE devient par blocs re-contrôlés
+     jusqu'au calme (budget PAUSE_MAX_BLOCKS) et une PORTE DE FIN
+     DE PRESSE refuse l'export d'un mat explosé — le 10000 seed 2
+     a fini à vmax 16 mm/ms, sommet 34 µm AU-DESSUS de la plaque,
+     et a quand même été exporté.
+     Plus deux adoucissements de la phase raide : presse multi-nips
+     (--nips, setpoints géométriques + consolidation intermédiaire —
+     une calandre réelle presse en nips multiples) et incréments
+     fins (FINE_INCR = 5 µm) sur les FINE_GAP = 100 µm au-dessus de
+     la cible : plaque 5x plus lente là où l'énergie par pas est
+     maximale. NB : la rampe P1 suit désormais l'AVANCEMENT en z,
+     plus l'index d'incrément (qui mentait en phase fine).
+
 v2.3 — CAGE À LA TAILLE DU TAS :
      le lanceur des runs seed 1 (v2.1/v2.2) n'était PAS la plaque :
      deux cinématiques radicalement différentes (25 µm/incrément vs
@@ -65,19 +91,26 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, BUFFER_MARGIN,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 2
+CODE_VERSION = 2.5
 
 # presse
 INCR = 0.025               # mm par incrément de descente
+FINE_INCR = 0.005          # v2.5 : incrément de la phase finale fine
+FINE_GAP = 0.1             # v2.5 : distance à la cible déclenchant FINE_INCR
 STEPS_PER_INCR = 200
 PRELAX_STEPS = 1500        # route A : sous gravité ; route B : sans gravité
-PAUSE_STEPS = 400          # P2 : pause plaque-fixe en cas de dérive
+PAUSE_STEPS = 400          # P2 : bloc de pause plaque-fixe en cas de dérive
+PAUSE_MAX_BLOCKS = 25      # v2.5 : budget de pause (25 x 400 = 10 000 pas)
+VPAUSE_EXIT = 0.15         # v2.5 : sortie de pause (plaque ~0,06 + marge)
 GUARD_EVERY = 20           # P2 : contrôle tous les N incréments
 VMAX_LIMIT = 0.25          # mm/ms = 4x la vitesse de descente de la plaque
 MAX_PAUSES = 3             # P2 : abort si la dérive persiste
 FINAL_SETTLE_MIN = 1000    # minimum de stabilisation finale
-FINAL_SETTLE_MAX = 10000    # plafond si le silence cinématique ne vient pas
+FINAL_SETTLE_MAX = 10000   # plafond si le silence cinématique ne vient pas
 VQUIET = 0.01              # mm/ms : seuil de repos pour l'export
+QUIET_EVERY = 500          # v2.5 : espacement des contrôles de repos
+QUIET_RUNS = 4             # v2.5 : contrôles CONSECUTIFS exigés
+NIP_BUDGET = 3000          # v2.5 : pas max de consolidation inter-nip
 
 # plaque et parois
 PLATE_HALF_T = 0.05        # demi-épaisseur de la plaque
@@ -89,10 +122,10 @@ PLATE_FRICTION = 0.05      # v3 : plaque glissante CONSTANTE — la rampe
                            # ne s'applique plus à la plaque. NB Bullet :
                            # friction effective d'un contact = PRODUIT des
                            # coefficients des deux corps. Donc fibre-plaque
-                           # = lat x 0.05, fibre-fibre = lat² (0,0225 -> 1,0
+                           # = lat x 0,05, fibre-fibre = lat² (0,0225 -> 1,0
                            # aux défauts), parois/fond = lat x 0,1. Toute
                            # valeur nominale se lit au carré.
-                           
+
 # rampe de frottement fibre-fibre (P1)
 F0_DEFAULT = 0.15          # latéral en début de presse
 F1_DEFAULT = 1.0           # latéral en fin de presse (= settle « à fond »)
@@ -136,6 +169,33 @@ def sample_lengths(rng, n):
 
 # ------------------------------------------------------------ monde
 
+_SLEEP_SUPPORTED = None    # sonde v2.5 : None = pas encore testé
+
+
+def _no_sleep(client, body):
+    """Anti-narcolepsie (v2.5). Le seuil de sommeil Bullet vaut 0,4
+    en unités brutes (0,4 mm/ms ici, au-dessus des vitesses du
+    dépôt) et le temps de désactivation 2,0 s brutes (~1000 pas) :
+    un corps tranquille s'endort, IGNORE la gravité et escroque les
+    critères d'immobilité — dossier des fibres fantômes du settle
+    (241/999 flottants). sleepThreshold=0 ferme la porte. Paramètre
+    sondé UNE fois : si ce pybullet le rejette, avertissement unique
+    puis silence. changeDynamics ne touche pas aux champs non
+    spécifiés : la rampe ne peut pas ré-ouvrir la porte. pressmt.py
+    applique le même correctif (redondance voulue)."""
+    global _SLEEP_SUPPORTED
+    if _SLEEP_SUPPORTED is False:
+        return
+    try:
+        p.changeDynamics(body, -1, sleepThreshold=0.0,
+                         physicsClientId=client)
+        _SLEEP_SUPPORTED = True
+    except Exception:
+        _SLEEP_SUPPORTED = False
+        print("ATTENTION : sleepThreshold non supporté par ce pybullet "
+              "— risque de fibres endormies en vol (dossier narcolepsie)")
+
+
 def set_fiber_friction(client, body, lat, roll, spin, damping=DAMPING):
     p.changeDynamics(body, -1, lateralFriction=lat, rollingFriction=roll,
                      spinningFriction=spin, frictionAnchor=False,
@@ -154,6 +214,7 @@ def make_fiber_body(client, center, direction, length, radius, mass,
                              basePosition=list(center), baseOrientation=quat,
                              physicsClientId=client)
     set_fiber_friction(client, body, lat, roll, spin, damping)
+    _no_sleep(client, body)   # v2.5 : couvre routes A et B
     return body
 
 
@@ -179,8 +240,8 @@ def build_plate(client, z_bottom):
                                  halfExtents=[half, half, PLATE_HALF_T],
                                  physicsClientId=client)
     plate = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=col,
-                               basePosition=[0.0, 0.0, z_bottom + PLATE_HALF_T],
-                               physicsClientId=client)
+                              basePosition=[0.0, 0.0, z_bottom + PLATE_HALF_T],
+                              physicsClientId=client)
     return plate
 
 
@@ -200,7 +261,7 @@ def build_wells(client, ext_x, ext_y):
              ([0.05, wall_len, WALL_H], [-(face_x + 0.05), 0.0, WALL_H])]
     for half_ext, pos in specs:
         col = p.createCollisionShape(p.GEOM_BOX, halfExtents=half_ext,
-                                      physicsClientId=client)
+                                     physicsClientId=client)
         wall = p.createMultiBody(baseMass=0, baseCollisionShapeIndex=col,
                                  basePosition=pos, physicsClientId=client)
         p.changeDynamics(wall, -1, lateralFriction=WALL_FRICTION,
@@ -340,7 +401,7 @@ def _survey(client, fibers):
     z_top = 0.0
     for f in fibers:
         pos, quat = p.getBasePositionAndOrientation(f["body"],
-                                                     physicsClientId=client)
+                                                    physicsClientId=client)
         lin, _ = p.getBaseVelocity(f["body"], physicsClientId=client)
         d = quat_to_direction(quat)
         f["pos"], f["dir"] = pos, d
@@ -349,112 +410,180 @@ def _survey(client, fibers):
     return vmax, z_top
 
 
+def _pause_until_calm(client, fibers, verbose=True):
+    """v2.5 : remplace la pause fixe (v2.4 : 400 pas sans re-contrôle,
+    reprise aveugle). Pauses par blocs de PAUSE_STEPS pas avec
+    re-contrôle à chaque bloc, sortie quand vmax < VPAUSE_EXIT ;
+    RuntimeError au budget épuisé — un éclat non résorbé ne doit pas
+    couler vers l'export (le run 10000 seed 2 est mort exactement
+    comme ça : vmax 16 mm/ms au dernier incrément, exporté quand
+    même)."""
+    v = float("inf")
+    for _ in range(PAUSE_MAX_BLOCKS):
+        for _ in range(PAUSE_STEPS):
+            p.stepSimulation(physicsClientId=client)
+        v, _ = _survey(client, fibers)
+        if verbose:
+            print(f"    pause plaque fixe : vmax={v:.3f} mm/ms "
+                  f"(sortie sous {VPAUSE_EXIT})")
+        if v < VPAUSE_EXIT:
+            return
+    raise RuntimeError(
+        f"éclat non résorbé après {PAUSE_MAX_BLOCKS * PAUSE_STEPS} pas "
+        f"plaque-fixe (vmax={v:.3f} > {VPAUSE_EXIT}) — refus d'export "
+        "d'un mat explosé : revoir --nips, incréments ou paramètres")
+
+
+def _settle_until_quiet(client, fibers, runs, min_steps, budget, label):
+    """Silence cinématique v2.5 : `runs` contrôles CONSECUTIFS sous
+    VQUIET, espacés de QUIET_EVERY pas. Un contrôle isolé (v2.4)
+    pouvait se faire escroquer : une fibre en chute libre partant du
+    repos franchit VQUIET en ~510 pas (v = g·t) et reste sous le
+    seuil pendant presque toute une fenêtre de 500. runs=4 (fenêtre
+    effective 2000 pas) ne peut pas être traversé par un seul épisode
+    de chute ; chaque rebond remet le compteur à zéro."""
+    waited = 0
+    while waited < min_steps:
+        p.stepSimulation(physicsClientId=client)
+        waited += 1
+    quiet = 0
+    while waited < budget:
+        if waited % QUIET_EVERY == 0:
+            v, _ = _survey(client, fibers)
+            quiet = quiet + 1 if v < VQUIET else 0
+            if quiet >= runs:
+                print(f"  {label} atteint à {waited} pas "
+                      f"({quiet} contrôles consécutifs, vmax={v:.4f} mm/ms)")
+                return waited
+        p.stepSimulation(physicsClientId=client)
+        waited += 1
+    print(f"  AVERTISSEMENT : pas de silence cinématique après "
+          f"{budget} pas ({label}) — export d'un état agité")
+    return waited
+
+
 def run_press(client, fibers, target, frict0, frict1, verbose=True,
-              zero_g=False, damping=DAMPING):
-    """Descente de plaque : INCR total par incrément, mais déplacée à
-    CHAQUE PAS (v2.2) de INCR/STEPS_PER_INCR. Rampe P1 sur toutes les
-    fibres à chaque incrément, gardes P2 tous les GUARD_EVERY
-    incréments.
+              zero_g=False, damping=DAMPING, nips=1):
+    """Descente de plaque par incréments déplacés à CHAQUE PAS
+    (v2.2). Rampe P1 sur toutes les fibres, gardes P2 tous les
+    GUARD_EVERY incréments.
 
-    zero_g=True (route B) : presse en apesanteur (phase liquide) ;
-    gravité restaurée juste avant le settle final — le test de
-    consolidation : le mat doit tenir la cible sous son propre poids.
+    v2.5 — multi-nips : la descente se fait en `nips` étapes vers des
+    setpoints GÉOMÉTRIQUES (halving de la distance restante : les nips
+    se serrent vers la cible, là où ça devient raide), avec
+    consolidation intermédiaire entre deux nips — une calandre réelle
+    presse en nips multiples, chaque nip relâche les bourrages avant
+    le suivant. nips=1 reproduit la descente continue v2.4.
+    Phase finale fine : dès que la distance au SETPOINT FINAL tombe
+    sous FINE_GAP, les incréments passent à FINE_INCR (5 µm) — plaque
+    5x plus lente sur les derniers 100 µm, où l'énergie stockée par
+    bourrage est maximale (l'éclat du 10000 seed 2 est parti de là).
 
-    v2.4 : export REPOSÉ — on attend le silence cinématique
-    (vmax < VQUIET) au lieu d'un compte de pas fixe. Le run 1000
-    seed 1 a été exporté 2 ms après l'arrêt de la plaque : les fibres
-    suivaient encore à ~0,07 mm/ms et ont continué sur leur élan
-    (sommet 0,302 -> 0,224 mm). Sans ça, les hauteurs finales ne
-    sont comparables ni entre routes ni entre runs."""
+    zero_g=True (route B) : presse en apesanteur (phase liquide), y
+    compris les consolidations inter-nips ; gravité restaurée avant
+    le test de consolidation final : le mat doit tenir la cible sous
+    son propre poids, export à l'état reposé (v2.4)."""
     z_start = max(top_exact(f["center"], f["direction"], f["length"], f["radius"])
                   for f in fibers) + 0.02
-    n_incr = int(math.ceil((z_start - target) / INCR))
-    total_steps = n_incr * STEPS_PER_INCR
-    dz = (z_start - target) / total_steps     # ~0,125 µm/pas, cible exacte
+    span = z_start - target
+    if nips < 1:
+        raise ValueError("nips >= 1 requis")
+    setpoints = [target + span * 0.5 ** i for i in range(nips - 1, 0, -1)]
+    setpoints.append(target)
     plate = build_plate(client, z_start)
-    print(f"presse : {n_incr} incréments de {INCR*1e3:.0f} µm x "
-          f"{STEPS_PER_INCR} pas (plaque {dz*1e3:.3f} µm/pas), "
-          f"rampe {frict0}->{frict1} "
+    print(f"presse : {nips} nip(s) -> "
+          + " -> ".join(f"{z:.3f}" for z in setpoints)
+          + f" mm, incréments {INCR*1e3:.0f} µm (fins {FINE_INCR*1e3:.0f} µx "
+          f"sous {FINE_GAP*1e3:.0f} µm de la cible), {STEPS_PER_INCR} "
+          f"pas/incr, rampe {frict0}->{frict1} "
           f"(rolling {ROLL_START}->{ROLL_END})"
           + ("  [APESANTEUR — phase liquide]" if zero_g else ""))
 
     prev_above = 0
     n_pauses = 0
     t0 = time.perf_counter()
-    t_step = 0
-    for k in range(1, n_incr + 1):
-        frac = k / n_incr
-        
-        # ---- P1 : la rampe s'applique aux FIBRES uniquement (v3)
-        lat = frict0 + (frict1 - frict0) * frac
-        roll = ROLL_START + (ROLL_END - ROLL_START) * frac
-        for f in fibers:
-            set_fiber_friction(client, f["body"], lat, roll, roll, damping)
-        # v3 : plaque en friction constante basse — elle presse,
-        # elle n'agrippe pas. (v2 : elle recevait la rampe et finissait
-        # à frict1, collant les fibres en fin de course.)
-        p.changeDynamics(plate, -1, lateralFriction=PLATE_FRICTION,
-                         rollingFriction=0.0, spinningFriction=0.0,
-                         restitution=0.0, physicsClientId=client)
-                         
-        for _ in range(STEPS_PER_INCR):
-            z_bot = z_start - dz * (t_step + 1)
-            p.resetBasePositionAndOrientation(plate,
-                                              [0.0, 0.0, z_bot + PLATE_HALF_T],
-                                              [0.0, 0.0, 0.0, 1.0],
-                                              physicsClientId=client)
-            p.stepSimulation(physicsClientId=client)
-            t_step += 1
+    total_incr = 0
+    z_now = z_start
+    for si, z_end in enumerate(setpoints):
+        last_nip = si == len(setpoints) - 1
+        while z_now > z_end + 1e-9:
+            fine = last_nip and (z_now - target) <= FINE_GAP + 1e-9
+            incr = FINE_INCR if fine else INCR
+            z_next = max(z_end, z_now - incr)
+            dz = (z_now - z_next) / STEPS_PER_INCR
+            # ---- P1 : rampe par AVANCEMENT en z (v2.5 : la fraction
+            # d'index mentait dès que les incréments variaient)
+            frac = (z_start - z_now) / span
+            lat = frict0 + (frict1 - frict0) * frac
+            roll = ROLL_START + (ROLL_END - ROLL_START) * frac
+            for f in fibers:
+                set_fiber_friction(client, f["body"], lat, roll, roll, damping)
+            # v3 : plaque en friction constante basse — elle presse,
+            # elle n'agrippe pas.
+            p.changeDynamics(plate, -1, lateralFriction=PLATE_FRICTION,
+                             rollingFriction=0.0, spinningFriction=0.0,
+                             restitution=0.0, physicsClientId=client)
+            for k in range(STEPS_PER_INCR):
+                z_bot = z_now - dz * (k + 1)
+                p.resetBasePositionAndOrientation(plate,
+                                                  [0.0, 0.0, z_bot + PLATE_HALF_T],
+                                                  [0.0, 0.0, 0.0, 1.0],
+                                                  physicsClientId=client)
+                p.stepSimulation(physicsClientId=client)
+            z_now = z_next
+            total_incr += 1
 
-        # ---- P2 : gardes
-        if k % GUARD_EVERY == 0 or k == n_incr:
-            vmax, z_top = _survey(client, fibers)
-            n_above = sum(1 for f in fibers
-                          if bottom_exact(f["pos"], f["dir"], f["length"],
-                                          f["radius"]) > z_bot + 0.02)
-            if verbose:
-                print(f"  incr {k}/{n_incr}  plaque z={z_bot:.3f} mm  "
-                      f"sommet tas z={z_top:.3f} mm  vmax={vmax:.3f} mm/ms  "
-                      f"au-dessus={n_above}  ({time.perf_counter()-t0:.0f} s)")
-            # dérive = explosion (vmax) ou escalade progressive de la plaque
-            drift = vmax > VMAX_LIMIT or n_above > prev_above
-            if drift:
-                n_pauses += 1
-                print(f"  <-- DÉRIVE (vmax={vmax:.3f}, au-dessus "
-                      f"{prev_above}->{n_above}) : pause {PAUSE_STEPS} pas, "
-                      f"plaque fixe ({n_pauses}/{MAX_PAUSES})")
-                if n_pauses >= MAX_PAUSES:
-                    raise RuntimeError(
-                        "presse divergente : la dérive persiste après "
-                        f"{MAX_PAUSES} pauses — matériau ou paramètres à revoir")
-                for _ in range(PAUSE_STEPS):
-                    p.stepSimulation(physicsClientId=client)
-            else:
-                n_pauses = 0
-            prev_above = n_above
+            # ---- P2 : gardes
+            if total_incr % GUARD_EVERY == 0 or z_now <= z_end + 1e-9:
+                vmax, z_top = _survey(client, fibers)
+                n_above = sum(1 for f in fibers
+                              if bottom_exact(f["pos"], f["dir"], f["length"],
+                                              f["radius"]) > z_now + 0.02)
+                if verbose:
+                    print(f"  incr {total_incr} (nip {si+1}/{len(setpoints)})  "
+                          f"plaque z={z_now:.3f} mm  "
+                          f"sommet tas z={z_top:.3f} mm  vmax={vmax:.3f} mm/ms  "
+                          f"au-dessus={n_above}  ({time.perf_counter()-t0:.0f} s)")
+                # dérive = explosion (vmax) ou escalade de la plaque
+                drift = vmax > VMAX_LIMIT or n_above > prev_above
+                if drift:
+                    n_pauses += 1
+                    print(f"  <-- DÉRIVE (vmax={vmax:.3f}, au-dessus "
+                          f"{prev_above}->{n_above}) : pause plaque fixe "
+                          f"({n_pauses}/{MAX_PAUSES})")
+                    if n_pauses >= MAX_PAUSES:
+                        raise RuntimeError(
+                            "presse divergente : la dérive persiste après "
+                            f"{MAX_PAUSES} épisodes — matériau ou paramètres "
+                            "à revoir")
+                    _pause_until_calm(client, fibers, verbose)
+                else:
+                    n_pauses = 0
+                prev_above = n_above
+
+        # ---- consolidation inter-nip : relâcher les bourrages avant
+        # le nip suivant (apesanteur conservée — phase liquide)
+        if not last_nip:
+            print(f"  nip {si+1}/{len(setpoints)} à {z_now:.3f} mm : "
+                  f"consolidation intermédiaire (max {NIP_BUDGET} pas)")
+            _settle_until_quiet(client, fibers, runs=2, min_steps=500,
+                                budget=NIP_BUDGET, label="consolidation nip")
+
+    # ---- v2.5 : PORTE DE FIN DE PRESSE — pas d'export d'un mat explosé
+    vmax, _ = _survey(client, fibers)
+    if vmax > VMAX_LIMIT:
+        print(f"  <-- éclat en fin de presse (vmax={vmax:.3f} mm/ms) : "
+              f"détente avant consolidation, export refusé si non résorbé")
+        _pause_until_calm(client, fibers, verbose)
 
     # ---- test de consolidation (route B) : gravité restaurée
     if zero_g:
         p.setGravity(0, 0, GRAVITY, physicsClientId=client)
         print(f"gravité restaurée : test de consolidation — "
               f"le mat doit tenir la cible ; export à l'état reposé")
-    # ---- v2.4 : stabilisation jusqu'au repos (min/max encadrés)
-    waited = 0
-    while waited < FINAL_SETTLE_MIN:
-        p.stepSimulation(physicsClientId=client)
-        waited += 1
-    while waited < FINAL_SETTLE_MAX:
-        if waited % 500 == 0:
-            v, _ = _survey(client, fibers)
-            if v < VQUIET:
-                print(f"  repos atteint à {waited} pas "
-                      f"(vmax={v:.4f} mm/ms)")
-                break
-        p.stepSimulation(physicsClientId=client)
-        waited += 1
-    else:
-        print(f"  AVERTISSEMENT : pas de silence cinématique après "
-              f"{FINAL_SETTLE_MAX} pas — export d'un état agité")
+    _settle_until_quiet(client, fibers, runs=QUIET_RUNS,
+                        min_steps=FINAL_SETTLE_MIN,
+                        budget=FINAL_SETTLE_MAX, label="repos")
     return plate
 
 
@@ -473,6 +602,10 @@ def main():
                     help="seed de la suspension (route B)")
     ap.add_argument("--box-z", type=float, default=BOX_Z_DEFAULT,
                     help="hauteur du volume de suspension (route B, mm)")
+    ap.add_argument("--nips", type=int, default=1,
+                    help="presse en N nips (setpoints géométriques + "
+                         "consolidation intermédiaire ; défaut 1 = "
+                         "descente continue v2.4)")
     ap.add_argument("--frict0", type=float, default=F0_DEFAULT,
                     help="frottement fibre-fibre en début de presse")
     ap.add_argument("--frict1", type=float, default=F1_DEFAULT,
@@ -486,6 +619,8 @@ def main():
         ap.error("donner un npz (route A) ou --random N (route B)")
     if args.random is not None and args.input is not None:
         ap.error("route A et route B sont exclusives")
+    if args.nips < 1:
+        ap.error("--nips >= 1")
 
     client = p.connect(p.DIRECT)
     p.setGravity(0, 0, GRAVITY, physicsClientId=client)  # mm/ms²
@@ -574,7 +709,8 @@ def main():
 
     # ----------------------------- presse -----------------------------
     run_press(client, fibers, args.target, args.frict0, args.frict1,
-              zero_g=zero_g, damping=LIQUID_DAMPING if zero_g else DAMPING)
+              zero_g=zero_g, damping=LIQUID_DAMPING if zero_g else DAMPING,
+              nips=args.nips)
 
     # ----------------------------- export -----------------------------
     _survey(client, fibers)          # dernier état : pos/dir à jour
@@ -593,7 +729,8 @@ def main():
     save_pile(out, centers, directions, lengths, radii, core,
               route="press", code_version=CODE_VERSION,
               seed=seed_out, n_total=n_total, n_actual=n_actual,
-              target=args.target, frict0=args.frict0, frict1=args.frict1,
+              target=args.target, nips=args.nips,
+              frict0=args.frict0, frict1=args.frict1,
               walls=walls_built, escaped=escaped, source=source)
 
     z_top_core = max((top_exact(c, d, L, r)

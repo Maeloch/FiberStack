@@ -1,5 +1,21 @@
 """
-pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.1, route B).
+pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.3, route B).
+
+v1.3 : plomberie --nips — l'argument traverse jusqu'à
+press.run_press (v2.5). nips=1 par défaut = descente continue
+(régression exacte de v1.2).
+
+v1.2 : placement par RE-TIRAGE COMPLET (cellule + xy + azimut + z à
+chaque essai). v1.1 fixait la cellule de grille d'une fibre et ne
+retentait que z : au-delà de ~15 fibres/mm³ la cellule est condamnée
+à tous les z et la fibre est perdue (10000 fibres en 4 tuiles =
+67 fibres/mm³ -> 358 échecs sur 2500, garde déclenchée). Le
+re-tirage consomme une cellule seulement si un essai réussit : les
+cellules bouchées sont contournées et la limite devient le vrai
+jamming RSA de la suspension. Ajouts : --place-only (sonde de
+faisabilité en secondes, sans presse ni export), densité de
+brouillard affichée, avertissement au-delà du validé (6,7-12,5
+fibres/mm³).
 
 v1.1 : quiet_consolidate passe à 2000 pas de fenêtre de silence
 (une chute libre partant du repos franchit vquiet en ~510 pas —
@@ -36,8 +52,9 @@ Vues d'ensemble :
   - press.run_press est réutilisé TEL QUEL : la plaque qu'il
     construit est dimensionnée sur le domaine 10×10 (12×12 mm) et
     déborde sur les murs de la tuile — sans conséquence (statique vs
-    cinématique : aucun contact résolu). Les gardes P2, la rampe P1
-    et le test de consolidation restent ceux du press v2.4.
+    cinématique : aucun contact résolu). Les gardes, la rampe P1 et
+    le test de consolidation restent ceux du press v2.5 (v1.3 : le
+    --nips de la v2.5 est passé tel quel au worker).
 
 Coûts attendus (à 10 000 fibres) : la phase chère est la compaction
 dense, dont le coût par pas suit ~le nombre de contacts -> une tuile
@@ -63,7 +80,7 @@ Validation croisées (AVANT de croire l'ensemble) :
        géométrie de la tuile (métadonnées tile_* dans le npz).
 
 Système d'unités : (mm, mg, ms). Nécessite : pybullet, numpy, scipy.
-REQUIERT le press.py déployé (v2.4) importable sans effet de bord
+REQUIERT le press.py déployé (v2.5) importable sans effet de bord
 (garde __main__ ; vérifier : grep -n "__main__" press.py).
 """
 
@@ -117,12 +134,18 @@ def _no_sleep(client, body):
 
 
 def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping):
-    """Suspension homogène dans une tuile : grille 2D brassée + jitter
-    (mêmes conventions que press.random_suspension), azimut uniforme,
-    z anti-chevauchement. Spécificité tuile : un candidat dont la
-    capsule déborderait d'une paroi est RAPPROCHÉ vers l'intérieur
-    (clip sur la projection de la demi-longueur) — léger biais de
-    densité près des murs, mangé par la bande de rebut."""
+    """Suspension homogène dans une tuile : grille 2D brassée + jitter,
+    azimut uniforme, z anti-chevauchement. Spécificité tuile : clip
+    anti-mur du centre sur la projection de la demi-longueur (biais
+    de densité près des murs, mangé par la bande de rebut).
+
+    v1.2 — re-tirage complet : à chaque essai, la fibre tire une
+    cellule LIBRE au hasard dans la piscine + jitter xy + azimut + z.
+    v1.1 fixait la cellule et ne retentait que z : au-delà de ~15
+    fibres/mm³, la cellule est condamnée à tous les z et la fibre
+    échoue (358/2500 observés à 67 fibres/mm³). Ici la cellule n'est
+    consommée que si un essai réussit ; la vraie limite devient le
+    jamming RSA de la suspension, à mesurer avec --place-only."""
     half = tile_side / 2.0
     diameters = press.sample_diameters(rng, n)
     lengths = press.sample_lengths(rng, n)
@@ -131,30 +154,34 @@ def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping):
     order = np.arange(g * g)
     rng.shuffle(order)
     grid = [(k // g, k % g) for k in order]
+    pool = list(range(len(grid)))          # cellules libres
 
     placed, hashcells, n_failed = [], {}, 0
     for k in range(n):
         r = float(diameters[k]) / 2.0
         L = float(lengths[k])
-        gi, gj = grid[k % len(grid)]
-        cx = -half + (gi + rng.uniform(0.15, 0.85)) * cellsize
-        cy = -half + (gj + rng.uniform(0.15, 0.85)) * cellsize
-        phi = rng.uniform(0.0, 2.0 * np.pi)
-        direction = np.array([np.cos(phi), np.sin(phi), 0.0])
-        ex = 0.5 * L * abs(direction[0])
-        ey = 0.5 * L * abs(direction[1])
-        limx = half - press.CLEAR - ex
-        limy = half - press.CLEAR - ey
-        cx = min(max(cx, -limx), limx)
-        cy = min(max(cy, -limy), limy)
-
-        center = None
+        center, direction = None, None
         for _ in range(press.MAX_PLACE_TRIES):
+            if not pool:
+                break
+            j = int(rng.integers(len(pool)))
+            gi, gj = grid[pool[j]]
+            cx = -half + (gi + rng.uniform(0.15, 0.85)) * cellsize
+            cy = -half + (gj + rng.uniform(0.15, 0.85)) * cellsize
+            phi = rng.uniform(0.0, 2.0 * np.pi)
+            direction = np.array([np.cos(phi), np.sin(phi), 0.0])
+            ex = 0.5 * L * abs(direction[0])
+            ey = 0.5 * L * abs(direction[1])
+            limx = half - press.CLEAR - ex
+            limy = half - press.CLEAR - ey
+            cx = min(max(cx, -limx), limx)
+            cy = min(max(cy, -limy), limy)
             z = rng.uniform(r, box_z - r)
             cand = np.array([cx, cy, z])
             if not press._touches_any(placed, hashcells, cand,
                                       direction, L, r):
                 center = cand
+                pool.pop(j)                # cellule consommée
                 break
         if center is None:
             n_failed += 1
@@ -258,9 +285,19 @@ def worker_tile(job):
                                        job["tile_side"], job["box_z"],
                                        job["frict0"], press.ROLL_START,
                                        press.ROLL_START, press.LIQUID_DAMPING)
+    if job.get("place_only"):
+        dens = job["n_tile"] / (job["tile_side"] ** 2 * job["box_z"])
+        print(f"tuile ({ix},{iy}) : PLACEMENT SEUL — {len(fibers)} placées, "
+              f"{n_failed} échecs "
+              f"({100.0 * n_failed / max(1, job['n_tile']):.1f} %), "
+              f"brouillard {dens:.1f} fibres/mm³")
+        p.disconnect(physicsClientId=client)
+        return dict(ix=ix, iy=iy, n=len(fibers), failed=n_failed,
+                    place_only=True)
     if n_failed > max(1, int(0.01 * job["n_tile"])):
         raise RuntimeError(f"tuile ({ix},{iy}) : {n_failed} échecs de "
-                           f"placement (> 1 %) — suspension trop dense ou bug")
+                           f"placement (> 1 %) — brouillard trop dense : "
+                           f"sonder --place-only ou augmenter --box-z")
 
     t0 = time.perf_counter()
     for _ in range(press.PRELAX_STEPS):
@@ -270,7 +307,7 @@ def worker_tile(job):
 
     press.run_press(client, fibers, job["target"], job["frict0"],
                     job["frict1"], verbose=True, zero_g=True,
-                    damping=press.LIQUID_DAMPING)
+                    damping=press.LIQUID_DAMPING, nips=job.get("nips", 1))
     quiet_consolidate(client, fibers)
     export_tile(client, fibers, job)
     p.disconnect(physicsClientId=client)
@@ -286,6 +323,11 @@ def main():
                     help="fibres TOTALES sur le domaine (réparties par tuile)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--target", type=float, default=0.3)
+    ap.add_argument("--nips", type=int, default=1,
+                    help="presse en N nips (v2.5 : setpoints géométriques "
+                         "+ consolidation inter-nips ; 1 = descente "
+                         "continue). Si la tuile pilote éclate en fin de "
+                         "course, réessayer avec --nips 2 ou 3.")
     ap.add_argument("--frict0", type=float, default=press.F0_DEFAULT,
                     help="début de rampe (défauts du press, NE PAS écraser)")
     ap.add_argument("--frict1", type=float, default=press.F1_DEFAULT,
@@ -301,6 +343,10 @@ def main():
                     help="bande de rebut par côté (>= L_max/2 + marge)")
     ap.add_argument("--workers", type=int, default=0,
                     help="0 = min(tuiles, cpu_count)")
+    ap.add_argument("--place-only", action="store_true",
+                    help="placer la suspension et sortir (sonde de "
+                         "faisabilité : pas de pré-relaxation, presse, "
+                         "ni export — quelques dizaines de secondes)")
     ap.add_argument("--outdir", default=".")
     args = ap.parse_args()
 
@@ -317,14 +363,21 @@ def main():
                              seed=args.seed, tile_side=args.tile_side,
                              box_z=args.box_z, burn_in=args.burn_in,
                              target=args.target, frict0=args.frict0,
-                             frict1=args.frict1, out=out))
+                             frict1=args.frict1, nips=args.nips, out=out,
+                             place_only=args.place_only))
             k += 1
 
     w = args.workers or min(n_tiles, os.cpu_count() or 1)
+    fog = (args.random / n_tiles) / (args.tile_side ** 2 * args.box_z)
     print(f"pressMT : {args.random} fibres en {n_tiles} tuiles de "
           f"{args.tile_side} mm ({args.nx}x{args.ny}), suspension "
-          f"{args.tile_side}x{args.tile_side}x{args.box_z} mm, {w} workers, "
+          f"{args.tile_side}x{args.tile_side}x{args.box_z} mm "
+          f"({fog:.1f} fibres/mm³), {w} workers, "
           f"rampe {args.frict0}->{args.frict1}")
+    if fog > 15.0:
+        print("ATTENTION : brouillard au-delà des densités validées "
+              "(6,7-12,5 fibres/mm³) — jamming RSA possible. Sonder "
+              "avec --place-only ; sinon augmenter --box-z.")
     t0 = time.perf_counter()
     ctx = multiprocessing.get_context("spawn")   # jamais fork avec pybullet
     with ctx.Pool(processes=w) as pool:

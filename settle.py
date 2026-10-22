@@ -1,5 +1,5 @@
 """
-settle.py — dépôt séquentiel de fibres de cellulose (PyBullet), v6.
+settle.py — dépôt séquentiel de fibres de cellulose (PyBullet), v6.1.
 
 Le dépôt reste celui validé par les runs 300/1000 (v5) : raycast de
 l'ombre de la fibre (place_fiber) + chute courte + stabilisation,
@@ -23,6 +23,28 @@ v6 — refactor de la revue de code :
   - N_RAYCAST_PROBES maintenu à 51 pour préserver la régression
     bit-exacte v5 -> v6 ; le passage à 64 (détecter un appui de 15 µm
     partout) se fera dans un commit séparé avec son propre banc
+
+v6.1 — anti-narcolepsie (le correctif qui manquait à la route A) :
+  - sleepThreshold=0 sur chaque fibre DÈS la création (drop_fiber).
+    Le seuil de sommeil Bullet vaut 0,4 en unités brutes (0,4 mm/ms
+    ici : au-dessus de V_START) et le corps s'endort après ~1000 pas
+    tranquilles : une fibre en stabilisation lente s'endort, IGNORE
+    la gravité et escroque le test d'immobilité de _wait_until_settled
+    — dossier des fibres fantômes (241/999 flottants). Même correctif
+    que press.py v2.5 et pressMT.py ; paramètre sondé une fois (si ce
+    pybullet le rejette : avertissement unique puis silence).
+  - CODE_VERSION 6 -> 7 : la physique change, donc la génération
+    change. Conséquence du contrôle strict à la reprise : tous les
+    npz v6 (routes settle/tiles) sont refusés. C'est VOULU — les
+    baselines route A (pile_300_0, pile_1000_1) contiennent des
+    dormeurs potentiels : à régénérer en v6.1, pas à reprendre.
+  - resume_pile n'a pas besoin du correctif : les corps reconstruits
+    sont gelés (masse 0), un corps statique ne s'endort pas.
+  - DIVERGENCE ATTENDUE vs v6 : un run v6.1 (même seed, même n) peut
+    différer d'un run v6 exactement là où v6 laissait une fibre
+    s'endormir en cours de stabilisation (pas_stab plus longs, fibres
+    qui finissent plus bas, moins de flottants). Toute AUTRE
+    divergence est un bug.
 
 NEUTRALITÉ COMPORTEMENTALE : un run v6 (même seed, même n) doit
 reproduire le run v5 colonne par colonne (d, L, pas_stab, pos_z, core) ;
@@ -54,7 +76,10 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, CELLULOSE_DENSITY,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 6          # contrôle strict à la reprise (int obligatoire)
+CODE_VERSION = 7          # contrôle strict à la reprise (int obligatoire)
+                          # v6.1 : physique nouvelle (plus de sommeil) ->
+                          # génération nouvelle ; npz v6 refusés,
+                          # baselines route A à régénérer
 
 N_FIBERS = 2000
 SEED = 0
@@ -176,6 +201,29 @@ def place_fiber(client, xy, direction, radius, length, max_h):
 
 # ------------------------------------------------------------ dépôt
 
+_SLEEP_SUPPORTED = None    # sonde v6.1 : None = pas encore testé
+
+
+def _no_sleep(client, body):
+    """Anti-narcolepsie (v6.1). Même correctif que press v2.5 :
+    sleepThreshold=0 dès la création, paramètre sondé une fois.
+    Un corps endormi pendant la stabilisation escroque
+    _wait_until_settled (l'immobilité est mesurée sur un corps que
+    la gravité n'atteint plus) — dossier 241/999 flottants."""
+    global _SLEEP_SUPPORTED
+    if _SLEEP_SUPPORTED is False:
+        return
+    try:
+        p.changeDynamics(body, -1, sleepThreshold=0.0,
+                         physicsClientId=client)
+        _SLEEP_SUPPORTED = True
+    except Exception:
+        _SLEEP_SUPPORTED = False
+        print("ATTENTION : sleepThreshold non supporté par ce pybullet "
+              "— risque de fibres endormies en stabilisation "
+              "(dossier narcolepsie)")
+
+
 def drop_fiber(client, xy, z_start, direction, radius, length,
                fall_steps=None):
     """Crée la fibre (axe aligné sur direction), part à -V_START, premier
@@ -198,6 +246,7 @@ def drop_fiber(client, xy, z_start, direction, radius, length,
                      restitution=0.0,
                      linearDamping=DAMPING, angularDamping=DAMPING,
                      physicsClientId=client)
+    _no_sleep(client, body)     # v6.1 : jamais de mise en sommeil
     p.resetBaseVelocity(body, [0.0, 0.0, -V_START], [0.0, 0.0, 0.0],
                         physicsClientId=client)
     if fall_steps is None:
@@ -252,6 +301,10 @@ def resume_pile(client, npz_path):
     connect/gravity/plancher, avant la boucle de dépôt.
     v6 : réservé aux routes settle/tiles, code_version strict — les npz
     v5 sont refusés (regénérer, ou reprendre un npz v6).
+    v6.1 : les npz v6 sont refusés aussi (génération nouvelle :
+    anti-narcolepsie) — régénérer les baselines route A. Les corps
+    reconstruits sont gelés (masse 0) : un corps statique ne dort
+    pas, aucun correctif nécessaire ici.
     NB : pas de relaxation du tas reconstruit."""
     data, meta = load_pile(npz_path, routes=("settle", "tiles"))
     if "code_version" not in meta or int(meta["code_version"]) != CODE_VERSION:
