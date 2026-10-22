@@ -85,6 +85,14 @@ WALL_H = 8.0               # demi-hauteur des parois (parois 0..16 mm)
 WALL_GAP = 0.1             # cage : étendue du tas + ce garde (mm)
 WALL_FRICTION = 0.1        # parois fixes, glissantes — la rampe est
                            # pour les FIBRES, pas pour la cage
+PLATE_FRICTION = 0.05      # v3 : plaque glissante CONSTANTE — la rampe
+                           # ne s'applique plus à la plaque. NB Bullet :
+                           # friction effective d'un contact = PRODUIT des
+                           # coefficients des deux corps. Donc fibre-plaque
+                           # = lat x 0.05, fibre-fibre = lat² (0,0225 -> 1,0
+                           # aux défauts), parois/fond = lat x 0,1. Toute
+                           # valeur nominale se lit au carré.
+                           
 # rampe de frottement fibre-fibre (P1)
 F0_DEFAULT = 0.15          # latéral en début de presse
 F1_DEFAULT = 1.0           # latéral en fin de presse (= settle « à fond »)
@@ -376,14 +384,19 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     t_step = 0
     for k in range(1, n_incr + 1):
         frac = k / n_incr
-        # ---- P1 : la rampe s'applique aux fibres, pas seulement à la plaque
+        
+        # ---- P1 : la rampe s'applique aux FIBRES uniquement (v3)
         lat = frict0 + (frict1 - frict0) * frac
         roll = ROLL_START + (ROLL_END - ROLL_START) * frac
         for f in fibers:
             set_fiber_friction(client, f["body"], lat, roll, roll, damping)
-        p.changeDynamics(plate, -1, lateralFriction=lat,
+        # v3 : plaque en friction constante basse — elle presse,
+        # elle n'agrippe pas. (v2 : elle recevait la rampe et finissait
+        # à frict1, collant les fibres en fin de course.)
+        p.changeDynamics(plate, -1, lateralFriction=PLATE_FRICTION,
                          rollingFriction=0.0, spinningFriction=0.0,
                          restitution=0.0, physicsClientId=client)
+                         
         for _ in range(STEPS_PER_INCR):
             z_bot = z_start - dz * (t_step + 1)
             p.resetBasePositionAndOrientation(plate,

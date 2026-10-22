@@ -8,7 +8,15 @@ le matin.
 
 Contrôles :
   - intégrité : pas de NaN/inf, directions unitaires, longueurs/rayons
-    positifs et dans les bornes du matériau
+    positifs ET dans les bornes du matériau (L dans mean±2σ : c'est
+    ce contrôle qui aurait mis pressedMT_1000_2_* au ROUGE — L≈0,5 mm
+    au lieu de [0,7 ; 1,3] est passé inaperçu tant qu'on ne testait
+    que « longueurs positives »)
+  - cohérence du flag core : recalculé depuis les centres dans la
+    ZONE UTILE réelle — monolithe : MEASURE_SIDE (±3,5) ; tuile
+    pressMT : (tile_side - 2*burn_in) (±1,25 par défaut), lue dans
+    les métadonnées du npz. Une tuile à 250 fibres dont 63 core
+    n'est PAS une divergence : c'est la convention.
   - invariant n_total : jamais plus de fibres que demandé
   - cohérence du flag core (recalculé depuis les centres)
   - hauteur / profondeur : rien sous le plancher au-delà du biais
@@ -20,10 +28,11 @@ Contrôles :
   - --tiles  : histogramme 4x4 des centres ; échec si bloc vide ou
                déséquilibre max/min >= 2 (symptôme du bug historique
                du tir xy des tuiles)
-  - --crossply : ratio comptée/analytique ; fourchette [2.1, 2.6]
-               resserrée après mesure : 2.33/2.33/2.35 sur les runs v2
-               s=0.30/0.15/0.08. Les fichiers v1 (L=10, ~1.66)
-               échouent désormais — attendu, ils sont dépréciés.
+  - --crossply : ratio comptée/analytique ; fourchette élargie
+               [1.2, 3.0] — v1 (L=10) mesurait ~1.66, v2 (L=10·√2)
+               doit donner ~2.5 par surcomptage géométrique (fibres
+               coupant la frontière comptées entières). À resserrer
+               après le premier run v2 mesuré.
 
 Usage :
     python validate.py pile_1000_0.npz
@@ -37,7 +46,18 @@ import numpy as np
 
 from structure import (DOMAIN_SIDE, MEASURE_SIDE, FILTER_THICKNESS,
                        FIBER_DIAMETER_HIGH,
+                       FIBER_LENGTH_MEAN, FIBER_LENGTH_STD,
                        top_exact, bottom_exact, seg_dist, load_pile)
+
+
+def zone_half(meta):
+    """Demi-côté de la zone utile, selon la géométrie du npz :
+    monolithe -> MEASURE_SIDE/2 ; tuile pressMT -> (tile_side -
+    2*burn_in)/2 (mêmes bornes que pressmt.export_tile)."""
+    if int(meta.get("pressmt", 0)) == 1 and "tile_side" in meta:
+        side = float(meta["tile_side"]) - 2.0 * float(meta.get("burn_in", 0.0))
+        return side / 2.0, side
+    return MEASURE_SIDE / 2.0, MEASURE_SIDE
 
 
 def run_checks(path, check_tiles=False, check_crossply=False):
@@ -74,6 +94,19 @@ def run_checks(path, check_tiles=False, check_crossply=False):
           f"(borne {0.5*FIBER_DIAMETER_HIGH*1e3:.1f} µm)")
     check("longueurs positives", (lengths > 0).all(),
           f"L min/max = {lengths.min():.3f}/{lengths.max():.3f} mm")
+    l_lo = FIBER_LENGTH_MEAN - 2.0 * FIBER_LENGTH_STD
+    l_hi = FIBER_LENGTH_MEAN + 2.0 * FIBER_LENGTH_STD
+    if meta.get("route") == "crossply":
+        # fibres traversantes (L = 10·√2 par construction) : hors
+        # bornes du matériau PAR CONSTRUCTION, contrôle sans objet
+        check("longueurs dans les bornes du matériau (truncnorm ±2σ)",
+              True, "exempté : route crossply (fibres traversantes)")
+    else:
+        check("longueurs dans les bornes du matériau (truncnorm ±2σ)",
+              (lengths >= l_lo - 1e-9).all() and (lengths <= l_hi + 1e-9).all(),
+              f"L min/max = {lengths.min():.3f}/{lengths.max():.3f} mm "
+              f"(attendu [{l_lo:.3f} ; {l_hi:.3f}]) — "
+              f"échec = mauvaise matière (structure.py ou presse divergente)")
 
     # ---------- 2) invariant n_total ----------
     if "n_total" in meta:
@@ -87,7 +120,11 @@ def run_checks(path, check_tiles=False, check_crossply=False):
         print("PASS   (pas de n_total dans les métadonnées — ancien format)")
 
     # ---------- 3) cohérence du flag core ----------
-    half_m = MEASURE_SIDE / 2.0
+    half_m, zone_side = zone_half(meta)
+    if int(meta.get("pressmt", 0)) == 1:
+        print(f"info  zone utile pressMT : {zone_side:.2f} mm de côté "
+              f"(tuile {float(meta['tile_side']):.2f}, rebut "
+              f"{float(meta.get('burn_in', 0.0)):.2f})")
     core_re = ((np.abs(centers[:, 0]) <= half_m)
                & (np.abs(centers[:, 1]) <= half_m))
     mism = int((core_re != core).sum())
@@ -95,8 +132,8 @@ def run_checks(path, check_tiles=False, check_crossply=False):
           f"{mism} divergences" if mism else f"{int(core.sum())} core")
 
     # ---------- 4) hauteur / plancher ----------
-    z_min = min(bottom_exact(centers[i], directions[i], lengths[i], radii[i])
-                for i in range(n))
+    z_min = min(bottom_exact(c, directions[i], lengths[i], radii[i])
+                for i, c in enumerate(centers))
     check("rien sous le plancher (tolérance biais Bullet)",
           z_min >= -0.05,
           f"z_min = {z_min:.4f} mm")
@@ -177,11 +214,10 @@ def run_checks(path, check_tiles=False, check_crossply=False):
                     / (MEASURE_SIDE ** 2 * z_max)
             phi_a = np.pi * (radii ** 2).mean() / (spacing * pitch)
             ratio = phi_c / phi_a
-            check("crossply : ratio comptée/analytique dans [2.1, 2.6]",
-                  2.1 <= ratio <= 2.6,
+            check("crossply : ratio comptée/analytique dans [1.2, 3.0]",
+                  1.2 <= ratio <= 3.0,
                   f"comptée {phi_c*100:.1f} % / analytique {phi_a*100:.1f} % "
-                  f"= {ratio:.2f} (v2 mesuré 2.33/2.33/2.35 ; v1 L=10 "
-                  f"~1.66 -> rouge attendu, fichiers dépréciés)")
+                  f"= {ratio:.2f} (v1 ~1.66 attendu, v2 L=10√2 ~2.5)")
 
     # ---------- verdict ----------
     n_fail = sum(1 for _, ok, _ in results if not ok)

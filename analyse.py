@@ -2,21 +2,13 @@
 analyse.py — exploitation des fichiers pile .npz : porosité globale,
 profil de porosité par tranches, orientations, occupation surfacique.
 
-v2.1 — correctif occupation : échantillonnage ADAPTATIF le long de
-  l'axe (au moins 2 points par maille, plancher 50). Les 50 points
-  fixes sous-échantillonnaient les fibres longues : à L = 10 mm un
-  point tous les 200 µm, à L = 10√2 tous les 283 µm — la majorité des
-  mailles traversées n'était pas marquée. Les occupations crossply
-  v1 (39,1/63,8/86,6 %) étaient des artefacts de ce biais : la courbe
-  occupation-φ doit être REMESURÉE. Les tas settle (L <= 1,3 mm)
-  restent à 50 points : références inchangées.
-
 v2 — revue de code :
   - MEASURE_SIDE importé de structure.py (fini le littéral 7.0 : si le
     domaine change, l'analyse suit au lieu de mesurer une zone fantôme)
   - métadonnées du npz affichées au chargement (route, seed, n_total...)
   - hauteur EXACTE (extension verticale réelle de chaque capsule) :
-    re-baselinage fait — 300 fibres : 0,150 mm ; 1000 : 1,002 mm
+    les hauteurs v2 ne sont PAS comparables aux logs v5, qui gonflaient
+    de L/2 par le pire-cas vertical — re-baselinage à faire au Memo
   - fibres ponctuelles en z affectées à la tranche de leur axe
     (v1 les comptait zéro : toute structure parfaitement horizontale
     était invisible du profil — le crossply l'a révélé)
@@ -24,9 +16,17 @@ v2 — revue de code :
     par tranches est HORS DOMAINE pour les structures denses ; la
     métrique voxel la remplacera (voxelize.py, à venir)
 
+v2.2 — tuiles pressMT : la zone de mesure est lue dans les
+métadonnées du npz (tile_side, burn_in) au lieu du MEASURE_SIDE du
+monolithe. Avant ce patch, les porosités des tuiles étaient calculées
+sur une zone 7x7 fantôme (99,8 % affichés) alors que le cœur utile
+fait 2,5x2,5 ; toute porosité « globale » de tuile sortie avant v2.2
+est à rejeter.
+
 Usage :
     python analyse.py                    # -> pile.npz par défaut
     python analyse.py pile_1000_0.npz
+    python analyse.py pressedMT_1000_2_t00.npz
 """
 
 import sys
@@ -41,7 +41,17 @@ directions = data["directions"]   # (N,3) unitaires
 lengths    = data["lengths"]      # (N,)
 radii      = data["radii"]        # (N,)
 core       = data["core"]         # (N,) bool
-half_m = MEASURE_SIDE / 2
+
+# zone de mesure : monolithe -> MEASURE_SIDE ; tuile pressMT -> zone
+# utile (tile_side - 2*burn_in), mêmes bornes que pressmt.export_tile
+if int(meta.get("pressmt", 0)) == 1 and "tile_side" in meta:
+    zone_side = float(meta["tile_side"]) - 2.0 * float(meta.get("burn_in", 0.0))
+    print(f"zone de mesure pressMT : {zone_side:.2f} mm de côté "
+          f"(tuile {float(meta['tile_side']):.2f} - 2x"
+          f"{float(meta.get('burn_in', 0.0)):.2f} de rebut)")
+else:
+    zone_side = MEASURE_SIDE
+half_m = zone_side / 2
 
 # ---------- 1) volumes et porosité globale (zone de mesure) ----------
 # NB : les fibres qui coupent la frontière de la zone versent leur
@@ -54,7 +64,7 @@ core_mask = core & (np.abs(centers[:,0]) <= half_m) \
                   & (np.abs(centers[:,1]) <= half_m)
 z_ext = 0.5 * lengths * np.abs(directions[:, 2])
 z_max = (centers[:, 2] + z_ext + radii)[core_mask].max()
-domain_volume = MEASURE_SIDE**2 * z_max
+domain_volume = zone_side**2 * z_max
 porosity = 1 - volumes[core_mask].sum() / domain_volume
 print(f"fibres core : {core_mask.sum()}")
 print(f"hauteur du tas (core) : {z_max:.3f} mm")
@@ -70,7 +80,7 @@ if slice_h < 3 * d_mean:
           f"DE VALIDITÉ, les valeurs solides sont surcomptées. "
           f"Structure dense : utiliser la métrique voxel.")
 z_edges = np.linspace(0, z_max, n_slices + 1)
-slice_vol = (MEASURE_SIDE**2) * slice_h
+slice_vol = (zone_side**2) * slice_h
 c = centers[core_mask]; l = lengths[core_mask]; v = volumes[core_mask]
 e1 = c - 0.5*l[:,None]*directions[core_mask]
 e2 = c + 0.5*l[:,None]*directions[core_mask]
@@ -107,19 +117,13 @@ print("un C569 réel attendu : quelques degrés de médiane, une queue "
 
 # ---------- 4) occupation surfacique (footprint) ----------
 cell = 0.05  # mm
-nx = int(MEASURE_SIDE / cell)
+nx = int(zone_side / cell)
 occ = np.zeros((nx, nx), dtype=bool)
 e1c = centers[core_mask] - 0.5*lengths[core_mask,None]*directions[core_mask]
 e2c = centers[core_mask] + 0.5*lengths[core_mask,None]*directions[core_mask]
 for a, b in zip(e1c, e2c):
-    seg = b - a
-    L_f = float(np.linalg.norm(seg))
-    # v2.1 : échantillonnage adaptatif — au moins 2 points par maille,
-    # plancher 50 (les tas settle, L <= 1,3 mm, restent à 50 points,
-    # leurs références d'occupation ne changent pas)
-    n_s = max(50, int(np.ceil(2.0 * L_f / cell)) + 1)
-    ts = np.linspace(0, 1, n_s)
-    pts = a[None,:] + ts[:,None]*seg[None,:]
+    ts = np.linspace(0, 1, 50)
+    pts = a[None,:] + ts[:,None]*(b - a)[None,:]
     ixs = ((pts[:,0] + half_m) / cell).astype(int)
     iys = ((pts[:,1] + half_m) / cell).astype(int)
     ok = (ixs>=0)&(ixs<nx)&(iys>=0)&(iys<nx)
