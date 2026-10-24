@@ -116,7 +116,7 @@ def seg_dist(p1, q1, p2, q2):
 def save_pile(path, centers, directions, lengths, radii, core,
               route, code_version, **params):
     """Export unifié. `route` OBLIGATOIRE : settle | tiles | press |
-    crossply. `params` : tout ce qui décrit la génération (seed,
+    crossply | routed. `params` : tout ce qui décrit la génération (seed,
     n_total, target, spacing...) — les valeurs None sont omises
     (une métadonnée absente vaut mieux qu'une métadonnée fausse)."""
     scalars = {k: v for k, v in params.items() if v is not None}

@@ -49,6 +49,9 @@ if int(meta.get("pressmt", 0)) == 1 and "tile_side" in meta:
     print(f"zone de mesure pressMT : {zone_side:.2f} mm de côté "
           f"(tuile {float(meta['tile_side']):.2f} - 2x"
           f"{float(meta.get('burn_in', 0.0)):.2f} de rebut)")
+elif "core_half" in meta:
+    zone_side = 2.0 * float(meta["core_half"])
+    print(f"zone de mesure (core_half, route D) : {zone_side:.2f} mm de côté")
 else:
     zone_side = MEASURE_SIDE
 half_m = zone_side / 2

@@ -53,10 +53,14 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, FILTER_THICKNESS,
 def zone_half(meta):
     """Demi-côté de la zone utile, selon la géométrie du npz :
     monolithe -> MEASURE_SIDE/2 ; tuile pressMT -> (tile_side -
-    2*burn_in)/2 (mêmes bornes que pressmt.export_tile)."""
+    2*burn_in)/2 (mêmes bornes que pressmt.export_tile) ; route D
+    -> core_half des métadonnées (routed.py)."""
     if int(meta.get("pressmt", 0)) == 1 and "tile_side" in meta:
         side = float(meta["tile_side"]) - 2.0 * float(meta.get("burn_in", 0.0))
         return side / 2.0, side
+    if "core_half" in meta:
+        h = float(meta["core_half"])
+        return h, 2.0 * h
     return MEASURE_SIDE / 2.0, MEASURE_SIDE
 
 
@@ -125,6 +129,9 @@ def run_checks(path, check_tiles=False, check_crossply=False):
         print(f"info  zone utile pressMT : {zone_side:.2f} mm de côté "
               f"(tuile {float(meta['tile_side']):.2f}, rebut "
               f"{float(meta.get('burn_in', 0.0)):.2f})")
+    elif "core_half" in meta:
+        print(f"info  zone de mesure (core_half, route D) : "
+              f"{zone_side:.2f} mm de côté")
     core_re = ((np.abs(centers[:, 0]) <= half_m)
                & (np.abs(centers[:, 1]) <= half_m))
     mism = int((core_re != core).sum())
@@ -140,39 +147,45 @@ def run_checks(path, check_tiles=False, check_crossply=False):
 
     # ---------- 5) pénétration entre fibres ----------
     # hash spatial ; seuil = 4 rayons max (biais documenté ~1 rayon)
-    cell = 0.5
-    cells = {}
-    for idx in range(n):
-        c = centers[idx]
-        reach = 0.5 * lengths[idx] + radii[idx]
-        ix0 = int((c[0] - reach) // cell); ix1 = int((c[0] + reach) // cell)
-        iy0 = int((c[1] - reach) // cell); iy1 = int((c[1] + reach) // cell)
-        for ix in range(ix0, ix1 + 1):
-            for iy in range(iy0, iy1 + 1):
-                cells.setdefault((ix, iy), []).append(idx)
-    max_pen, n_pairs = 0.0, 0
-    seen = set()
-    for members in cells.values():
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                i, j = members[a], members[b]
-                if i >= j or (i, j) in seen:
-                    continue
-                seen.add((i, j))
-                if abs(centers[i][2] - centers[j][2]) > (
-                        0.5 * (lengths[i] + lengths[j]) + radii[i] + radii[j]):
-                    continue
-                p1 = centers[i] - 0.5 * lengths[i] * directions[i]
-                q1 = centers[i] + 0.5 * lengths[i] * directions[i]
-                p2 = centers[j] - 0.5 * lengths[j] * directions[j]
-                q2 = centers[j] + 0.5 * lengths[j] * directions[j]
-                d = seg_dist(p1, q1, p2, q2)
-                max_pen = max(max_pen, radii[i] + radii[j] - d)
-                n_pairs += 1
-    check("pénétration <= 4 rayons max",
-          max_pen <= 4.0 * r_max,
-          f"max {max_pen*1e3:.1f} µm sur {n_pairs} paires "
-          f"(biais documenté ~20-25 µm)")
+    if meta.get("route") == "routed":
+        check("pénétration", True,
+              "exempté : route D = germes booléens, chevauchements "
+              "par construction (le double-comptage est corrigé dans "
+              "routed.py, pas dans la géométrie)")
+    else:
+        cell = 0.5
+        cells = {}
+        for idx in range(n):
+            c = centers[idx]
+            reach = 0.5 * lengths[idx] + radii[idx]
+            ix0 = int((c[0] - reach) // cell); ix1 = int((c[0] + reach) // cell)
+            iy0 = int((c[1] - reach) // cell); iy1 = int((c[1] + reach) // cell)
+            for ix in range(ix0, ix1 + 1):
+                for iy in range(iy0, iy1 + 1):
+                    cells.setdefault((ix, iy), []).append(idx)
+        max_pen, n_pairs = 0.0, 0
+        seen = set()
+        for members in cells.values():
+            for a in range(len(members)):
+                for b in range(a + 1, len(members)):
+                    i, j = members[a], members[b]
+                    if i >= j or (i, j) in seen:
+                        continue
+                    seen.add((i, j))
+                    if abs(centers[i][2] - centers[j][2]) > (
+                            0.5 * (lengths[i] + lengths[j]) + radii[i] + radii[j]):
+                        continue
+                    p1 = centers[i] - 0.5 * lengths[i] * directions[i]
+                    q1 = centers[i] + 0.5 * lengths[i] * directions[i]
+                    p2 = centers[j] - 0.5 * lengths[j] * directions[j]
+                    q2 = centers[j] + 0.5 * lengths[j] * directions[j]
+                    d = seg_dist(p1, q1, p2, q2)
+                    max_pen = max(max_pen, radii[i] + radii[j] - d)
+                    n_pairs += 1
+        check("pénétration <= 4 rayons max",
+              max_pen <= 4.0 * r_max,
+              f"max {max_pen*1e3:.1f} µm sur {n_pairs} paires "
+              f"(biais documenté ~20-25 µm)")
 
     # ---------- 6) stats core (informatif) ----------
     cm = core if core.dtype == bool else core.astype(bool)
