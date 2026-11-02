@@ -10,6 +10,27 @@ Deux routes :
      phase liquide de fabrication : fibres réparties dans un volume,
      puis pressées — pas de dépôt gravitaire du tout).
 
+v2.6 — TOLÉRANCE DE CHEVAUCHEMENT AU PLACEMENT (--overlap-tol) :
+     le sweep 16x4750 a mesuré le mur du RSA sans chevauchement :
+     24,9 % d'échecs à box 2, 10,4 % à box 3, 3,4 % à box 4 — la
+     porte <1 % exigerait box-z ~6 (φ brouillard ~1 %, jamming RSA
+     des bâtonnets d'élancement 50), et la plaque balaierait 5,7 mm
+     (244 incréments). ORTHODOXIE DEM STANDARD : autoriser une
+     interpénétration INITIALE bornée (--overlap-tol, recommandé
+     3 µm = ~0,3 rayon, cap 6 µm = moitié du plus petit rayon) ;
+     c'est la pré-relaxation en apesanteur qui résout les contacts —
+     c'est son métier. Garde : avertissement si vmax > 0,01 mm/ms
+     après pré-relaxation (chevauchements non résolus). HONNÊTETÉ
+     sur l'argument « fibres aplatties aux croisements » : le
+     mécanisme du tol est la résolution par pré-relaxation, PAS une
+     déformation simulée ; la fiction d'aplatissement vit ailleurs —
+     dans la pénétration résiduelle de 15-25 µm que le solveur
+     laisse à tous les contacts, documentée depuis le début. Et une
+     configuration relaxée est PLUS proche d'une suspension
+     brownienne que le RSA, qui fabrique des corrélations
+     parasites. tol=0 par défaut = régression exacte de la v2.5.
+     Cheminée dans pressmt v1.4 ; overlap_tol stocké dans le npz.
+
 v2.5 — TROIS FERMETURES DU DOSSIER PHASE DENSE :
      (1) NARCOLEPSIE : sleepThreshold=0 à la création de chaque fibre
      (make_fiber_body). Le correctif prescrit au diagnostic des
@@ -91,7 +112,7 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, BUFFER_MARGIN,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 2.5
+CODE_VERSION = 2.6
 
 # presse
 INCR = 0.025               # mm par incrément de descente
@@ -134,6 +155,10 @@ ROLL_START, ROLL_END = 0.02, 0.30
 # route B : suspension homogène
 BOX_Z_DEFAULT = 8.0        # hauteur du volume de suspension (mm)
 CLEAR = 0.01               # garde anti-chevauchement au placement (mm)
+OVERLAP_TOL_MAX = 0.006    # v2.6 : cap de --overlap-tol (mm) = moitié du
+                           # plus petit rayon (7,5 µm) ; au-delà, contact
+                           # trop profond pour que la pré-relaxation le
+                           # résolve sans à-coups
 MAX_PLACE_TRIES = 20       # redéploiements en z avant échec (P4)
 LIQUID_DAMPING = 0.05      # ~5 %/ms (pybullet : pow(1-d, dt_brut)) —
                            # viscosité de phase liquide
@@ -313,9 +338,12 @@ def _hash_add(hashcells, idx, center, length, radius, cell=1.0):
 
 
 def _touches_any(placed, hashcells, center, direction, length, radius,
-                 cell=1.0):
-    """z-check (P4) : le candidat ne doit interpénétrer AUCUNE fibre
-    déjà placée — une interpénétration initiale = explosion Bullet.
+                 cell=1.0, tol=0.0):
+    """z-check (P4) : le candidat ne doit pas interpénétrer les fibres
+    déjà placées au-delà de `tol` (v2.6). tol=0 : tangent + CLEAR
+    (régression v2.5 — une interpénétration initiale NON bornée =
+    explosion Bullet). tol > 0 : chevauchement initial borné, résolu
+    par la pré-relaxation (usage DEM standard).
     Portée = demi-longueur + rayon du candidat + ~0,7 mm adverses."""
     reach = 0.5 * length + radius + 0.7
     p1, q1 = _seg_ends(center, direction, length)
@@ -331,17 +359,19 @@ def _touches_any(placed, hashcells, center, direction, length, radius,
                 for j in hashcells.get((ix, iy, iz), ()):
                     f = placed[j]
                     p2, q2 = _seg_ends(f["center"], f["direction"], f["length"])
-                    if seg_dist(p1, q1, p2, q2) < radius + f["radius"] + CLEAR:
+                    if seg_dist(p1, q1, p2, q2) < radius + f["radius"] + CLEAR - tol:
                         return True
     return False
 
 
 def random_suspension(client, n, seed, box_z, lat, roll, spin, damping,
-                      verbose=True):
+                      verbose=True, tol=0.0):
     """Route B : n fibres réparties dans un volume 10x10xbox_z.
     Grille 2D brassée (une fibre par cellule, jitter dans la cellule)
     pour la répartition xy ; z tiré au hasard, avec z-check
-    anti-chevauchement. Retourne (fibers, n_failed) — l'appelant
+    anti-chevauchement. v2.6 : tol borne le chevauchement initial
+    autorisé (0 = régression v2.5 ; borné par OVERLAP_TOL_MAX).
+    Retourne (fibers, n_failed) — l'appelant
     décide de l'abort (P4 : > 1 % d'échecs = bug ou densité absurde).
     NB : les fibres débordent du domaine par leurs extrémités — la
     cage est construite après coup à leur étendue (v2.3)."""
@@ -372,7 +402,8 @@ def random_suspension(client, n, seed, box_z, lat, roll, spin, damping,
         for _ in range(MAX_PLACE_TRIES):
             z = rng.uniform(r, box_z - r)
             cand = np.array([cx, cy, z])
-            if not _touches_any(placed, hashcells, cand, direction, L, r):
+            if not _touches_any(placed, hashcells, cand, direction, L, r,
+                               tol=tol):
                 center = cand
                 break
         if center is None:
@@ -606,6 +637,12 @@ def main():
                     help="presse en N nips (setpoints géométriques + "
                          "consolidation intermédiaire ; défaut 1 = "
                          "descente continue v2.4)")
+    ap.add_argument("--overlap-tol", type=float, default=0.0,
+                    help="v2.6 : interpénétration initiale autorisée au "
+                         "placement, en mm (0 = régression v2.5 ; "
+                         "recommandé 0.003 = ~0,3 rayon ; cap "
+                         f"{OVERLAP_TOL_MAX}). Résolue par la "
+                         "pré-relaxation — calibrer au --place-only.")
     ap.add_argument("--frict0", type=float, default=F0_DEFAULT,
                     help="frottement fibre-fibre en début de presse")
     ap.add_argument("--frict1", type=float, default=F1_DEFAULT,
@@ -621,6 +658,9 @@ def main():
         ap.error("route A et route B sont exclusives")
     if args.nips < 1:
         ap.error("--nips >= 1")
+    if not (0.0 <= args.overlap_tol <= OVERLAP_TOL_MAX):
+        ap.error(f"--overlap-tol dans [0, {OVERLAP_TOL_MAX}] mm "
+                 f"(recommandé : 0.003)")
 
     client = p.connect(p.DIRECT)
     p.setGravity(0, 0, GRAVITY, physicsClientId=client)  # mm/ms²
@@ -651,11 +691,14 @@ def main():
         # ---------------- route B : suspension homogène ----------------
         print(f"route B : suspension homogène, {args.random} fibres, "
               f"seed {args.seed}, volume {DOMAIN_SIDE}x{DOMAIN_SIDE}"
-              f"x{args.box_z} mm — presse en apesanteur (phase liquide)")
+              f"x{args.box_z} mm, tolérance placement "
+              f"{args.overlap_tol*1e3:.1f} µm — presse en apesanteur "
+              f"(phase liquide)")
         fibers, n_failed = random_suspension(client, args.random, args.seed,
                                              args.box_z, args.frict0,
                                              ROLL_START, ROLL_START,
-                                             LIQUID_DAMPING)
+                                             LIQUID_DAMPING,
+                                             tol=args.overlap_tol)
         n_total = args.random
         n_actual = len(fibers)
         if n_failed > max(1, int(0.01 * n_total)):
@@ -706,6 +749,12 @@ def main():
     vmax0, z_top0 = _survey(client, fibers)
     print(f"état après pré-relaxation : sommet {z_top0:.3f} mm, "
           f"vmax {vmax0:.3f} mm/ms")
+    if args.overlap_tol > 0.0 and vmax0 > 0.01:
+        print(f"AVERTISSEMENT v2.6 : vmax {vmax0:.3f} mm/ms après "
+              f"pré-relaxation — chevauchements initiaux (tol "
+              f"{args.overlap_tol*1e3:.1f} µm) non résolus : allonger "
+              f"PRELAX_STEPS ou réduire --overlap-tol avant de croire "
+              f"la presse")
 
     # ----------------------------- presse -----------------------------
     run_press(client, fibers, args.target, args.frict0, args.frict1,
@@ -730,6 +779,8 @@ def main():
               route="press", code_version=CODE_VERSION,
               seed=seed_out, n_total=n_total, n_actual=n_actual,
               target=args.target, nips=args.nips,
+              overlap_tol=(args.overlap_tol if args.random is not None
+                           else None),
               frict0=args.frict0, frict1=args.frict1,
               walls=walls_built, escaped=escaped, source=source)
 

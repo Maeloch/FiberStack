@@ -1,5 +1,14 @@
 """
-pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.3, route B).
+pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.4, route B).
+
+v1.4 : plomberie --overlap-tol (press v2.6) — tolérance de
+chevauchement initial au placement, bornée (cap 6 µm = moitié du
+plus petit rayon), résolue par la pré-relaxation. Contexte : le
+sweep 16x4750 a montré le mur du RSA sans chevauchement (3,4 %
+d'échecs à box 4, ~0,4 % projeté à box 6) ; avec 3 µm de
+tolérance, box 2-3 redevient viable et la plaque balaie 2-3 fois
+moins loin. tol=0 par défaut = régression exacte de la v1.3.
+overlap_tol stocké dans le npz de tuile.
 
 v1.3 : plomberie --nips — l'argument traverse jusqu'à
 press.run_press (v2.5). nips=1 par défaut = descente continue
@@ -80,8 +89,9 @@ Validation croisées (AVANT de croire l'ensemble) :
        géométrie de la tuile (métadonnées tile_* dans le npz).
 
 Système d'unités : (mm, mg, ms). Nécessite : pybullet, numpy, scipy.
-REQUIERT le press.py déployé (v2.5) importable sans effet de bord
-(garde __main__ ; vérifier : grep -n "__main__" press.py).
+REQUIERT le press.py déployé (v2.6) importable sans effet de bord
+(garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.4
+exige press.OVERLAP_TOL_MAX, absent de la v2.5).
 """
 
 import argparse
@@ -133,7 +143,8 @@ def _no_sleep(client, body):
               "— risque de fibres endormies en vol, vérifier avant usage")
 
 
-def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping):
+def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping,
+                    tol=0.0):
     """Suspension homogène dans une tuile : grille 2D brassée + jitter,
     azimut uniforme, z anti-chevauchement. Spécificité tuile : clip
     anti-mur du centre sur la projection de la demi-longueur (biais
@@ -145,7 +156,10 @@ def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping):
     fibres/mm³, la cellule est condamnée à tous les z et la fibre
     échoue (358/2500 observés à 67 fibres/mm³). Ici la cellule n'est
     consommée que si un essai réussit ; la vraie limite devient le
-    jamming RSA de la suspension, à mesurer avec --place-only."""
+    jamming RSA de la suspension, à mesurer avec --place-only.
+    v1.4 : tol borne le chevauchement initial autorisé (0 = régression
+    v1.3 ; cap press.OVERLAP_TOL_MAX = 6 µm) ; résolu par la
+    pré-relaxation — usage DEM standard."""
     half = tile_side / 2.0
     diameters = press.sample_diameters(rng, n)
     lengths = press.sample_lengths(rng, n)
@@ -179,7 +193,7 @@ def tile_suspension(client, n, rng, tile_side, box_z, lat, roll, spin, damping):
             z = rng.uniform(r, box_z - r)
             cand = np.array([cx, cy, z])
             if not press._touches_any(placed, hashcells, cand,
-                                      direction, L, r):
+                                      direction, L, r, tol=tol):
                 center = cand
                 pool.pop(j)                # cellule consommée
                 break
@@ -246,6 +260,7 @@ def export_tile(client, fibers, job):
               route="press", code_version=press.CODE_VERSION,
               seed=job["seed"], n_total=job["n_tile"], n_actual=len(fibers),
               target=job["target"], frict0=job["frict0"], frict1=job["frict1"],
+              overlap_tol=job.get("overlap_tol", 0.0),
               walls=True, escaped=0, pressmt=1,
               tile_ix=job["ix"], tile_iy=job["iy"],
               tile_side=job["tile_side"], burn_in=job["burn_in"])
@@ -284,7 +299,8 @@ def worker_tile(job):
     fibers, n_failed = tile_suspension(client, job["n_tile"], rng,
                                        job["tile_side"], job["box_z"],
                                        job["frict0"], press.ROLL_START,
-                                       press.ROLL_START, press.LIQUID_DAMPING)
+                                       press.ROLL_START, press.LIQUID_DAMPING,
+                                       tol=job.get("overlap_tol", 0.0))
     if job.get("place_only"):
         dens = job["n_tile"] / (job["tile_side"] ** 2 * job["box_z"])
         print(f"tuile ({ix},{iy}) : PLACEMENT SEUL — {len(fibers)} placées, "
@@ -328,6 +344,12 @@ def main():
                          "+ consolidation inter-nips ; 1 = descente "
                          "continue). Si la tuile pilote éclate en fin de "
                          "course, réessayer avec --nips 2 ou 3.")
+    ap.add_argument("--overlap-tol", type=float, default=0.0,
+                    help="v1.4 : interpénétration initiale autorisée au "
+                         "placement, en mm (0 = régression v1.3 ; "
+                         "recommandé 0.003 = ~0,3 rayon ; cap "
+                         f"{press.OVERLAP_TOL_MAX}). Résolue par la "
+                         "pré-relaxation ; calibrer au --place-only.")
     ap.add_argument("--frict0", type=float, default=press.F0_DEFAULT,
                     help="début de rampe (défauts du press, NE PAS écraser)")
     ap.add_argument("--frict1", type=float, default=press.F1_DEFAULT,
@@ -349,6 +371,9 @@ def main():
                          "ni export — quelques dizaines de secondes)")
     ap.add_argument("--outdir", default=".")
     args = ap.parse_args()
+    if not (0.0 <= args.overlap_tol <= press.OVERLAP_TOL_MAX):
+        raise SystemExit(f"--overlap-tol dans [0, {press.OVERLAP_TOL_MAX}] "
+                         f"mm (recommandé : 0.003)")
 
     n_tiles = args.nx * args.ny
     n_tile = args.random // n_tiles
@@ -363,7 +388,8 @@ def main():
                              seed=args.seed, tile_side=args.tile_side,
                              box_z=args.box_z, burn_in=args.burn_in,
                              target=args.target, frict0=args.frict0,
-                             frict1=args.frict1, nips=args.nips, out=out,
+                             frict1=args.frict1, nips=args.nips,
+                             overlap_tol=args.overlap_tol, out=out,
                              place_only=args.place_only))
             k += 1
 
@@ -372,7 +398,8 @@ def main():
     print(f"pressMT : {args.random} fibres en {n_tiles} tuiles de "
           f"{args.tile_side} mm ({args.nx}x{args.ny}), suspension "
           f"{args.tile_side}x{args.tile_side}x{args.box_z} mm "
-          f"({fog:.1f} fibres/mm³), {w} workers, "
+          f"({fog:.1f} fibres/mm³), tolérance placement "
+          f"{args.overlap_tol*1e3:.1f} µm, {w} workers, "
           f"rampe {args.frict0}->{args.frict1}")
     if fog > 15.0:
         print("ATTENTION : brouillard au-delà des densités validées "
