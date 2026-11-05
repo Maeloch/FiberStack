@@ -10,6 +10,44 @@ Deux routes :
      phase liquide de fabrication : fibres réparties dans un volume,
      puis pressées — pas de dépôt gravitaire du tout).
 
+v2.7 — LE COUCHAGE DE LA PERCOLATION (incident du 3/11 : campagne
+     16x4750 box 6 tol 0, ~20 h). Presse stable de l'incr 20 à 180
+     (plaque 5,52 -> 1,52 mm, vmax 0,07-0,09 = la vitesse de la
+     plaque), puis les 16 tuiles dérivent SIMULTANÉMENT à l'incr 200
+     (plaque ~1,02 mm, phi ~5,8 %, ~2 contacts par fibre) : le réseau
+     percole, les chaînes de forces s'ancrent aux parois, chaque
+     incrément stocke de l'énergie relâchée en avalanches (vmax
+     0,4-4,2, zéro fibre au-dessus de la plaque — rien à voir avec
+     l'éclat du monolithe 10000 : ici la garde a refusé l'export,
+     c'est son métier). Diagnostic PHYSIQUE, pas un bug : phi 3,9 %
+     est un brouillard de fibres libres, phi 5,8 % est un solide
+     autoporteur — le passage est une transition, identique sur les
+     16 tuiles au même incrément. La vraie limite du protocole : en
+     apesanteur une pause ne peut que DISSIPER (décroissance saine
+     4,2 -> 0,2 mm/ms en 10 000 pas, sortie manquée de 37 % : 0,205
+     contre 0,15) — un réseau jammé sans gravité n'a AUCUN biais
+     pour se tasser. TROIS CHANGEMENTS :
+     (1) COUCHAGE : à la première dérive, si la presse est en
+     apesanteur, la gravité est restaurée POUR LE RESTE du run. La
+     fiction v2.1 (une suspension qui tombe n'est plus homogène)
+     vaut pour le BROUILLARD, pas pour un réseau percolé : il n'y a
+     plus de tête de suspension, le mat occupe tout sous la plaque
+     (au-dessus = 0 au log) — pas de pluie balistica possible. Une
+     vraie table de formation fait exactement ça : le voile percole,
+     l'eau s'écoule, le voile devient un mat que gravité et presse
+     compactent ensemble.
+     (2) GARDES RESSERRÉES : dès la première dérive, contrôle à
+     CHAQUE incrément au lieu d'un tous les 20 (0,5 mm d'aveugle-
+     ment laissait l'avalanche s'installer : une avalanche prise à
+     25 µm d'énergie stockée se résorbe en centaines de pas).
+     (3) BUDGETS EN CLI : --pause-blocks (défaut 25 = régression
+     v2.6) et --max-pauses (défaut 3) ; après couchage, les cycles
+     dérive-pause deviennent l'opération NORMALE de la phase dense
+     — un abort à 3 épisodes consécutifs est mal calibré pour ça.
+     run_press remplit un dict `info` optionnel (couchage,
+     couchage_z = hauteur de percolation : grandeur physique du
+     mat, à stocker dans le npz).
+
 v2.6 — TOLÉRANCE DE CHEVAUCHEMENT AU PLACEMENT (--overlap-tol) :
      le sweep 16x4750 a mesuré le mur du RSA sans chevauchement :
      24,9 % d'échecs à box 2, 10,4 % à box 3, 3,4 % à box 4 — la
@@ -112,7 +150,7 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, BUFFER_MARGIN,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 2.6
+CODE_VERSION = 2.7
 
 # presse
 INCR = 0.025               # mm par incrément de descente
@@ -121,11 +159,20 @@ FINE_GAP = 0.1             # v2.5 : distance à la cible déclenchant FINE_INCR
 STEPS_PER_INCR = 200
 PRELAX_STEPS = 1500        # route A : sous gravité ; route B : sans gravité
 PAUSE_STEPS = 400          # P2 : bloc de pause plaque-fixe en cas de dérive
-PAUSE_MAX_BLOCKS = 25      # v2.5 : budget de pause (25 x 400 = 10 000 pas)
+PAUSE_MAX_BLOCKS = 25      # v2.5 : budget de pause ; v2.7 : DÉFAUT de
+                           # --pause-blocks (25 x 400 = 10 000 pas — la
+                           # campagne 16x4750 du 3/11 est morte à 0,205
+                           # contre 0,15 en fin de budget : en phase
+                           # dense le budget se négocie en CLI, pas en dur)
 VPAUSE_EXIT = 0.15         # v2.5 : sortie de pause (plaque ~0,06 + marge)
 GUARD_EVERY = 20           # P2 : contrôle tous les N incréments
 VMAX_LIMIT = 0.25          # mm/ms = 4x la vitesse de descente de la plaque
-MAX_PAUSES = 3             # P2 : abort si la dérive persiste
+MAX_PAUSES = 3             # P2 : abort si la dérive persiste ; v2.7 :
+                           # DÉFAUT de --max-pauses. Après couchage, les
+                           # cycles dérive-pause sont l'opération NORMALE
+                           # de la phase dense : monter le compteur en
+                           # campagne (50) — le vrai garde-fou reste le
+                           # budget de pause, pas le nombre d'épisodes
 FINAL_SETTLE_MIN = 1000    # minimum de stabilisation finale
 FINAL_SETTLE_MAX = 10000   # plafond si le silence cinématique ne vient pas
 VQUIET = 0.01              # mm/ms : seuil de repos pour l'export
@@ -441,16 +488,20 @@ def _survey(client, fibers):
     return vmax, z_top
 
 
-def _pause_until_calm(client, fibers, verbose=True):
+def _pause_until_calm(client, fibers, verbose=True, blocks=PAUSE_MAX_BLOCKS):
     """v2.5 : remplace la pause fixe (v2.4 : 400 pas sans re-contrôle,
     reprise aveugle). Pauses par blocs de PAUSE_STEPS pas avec
     re-contrôle à chaque bloc, sortie quand vmax < VPAUSE_EXIT ;
     RuntimeError au budget épuisé — un éclat non résorbé ne doit pas
     couler vers l'export (le run 10000 seed 2 est mort exactement
     comme ça : vmax 16 mm/ms au dernier incrément, exporté quand
-    même)."""
+    même). v2.7 : le budget devient un PARAMÈTRE (blocks) exposé en
+    CLI — le défaut 25 x 400 = 10 000 pas a échoué de 37 % sur la
+    campagne 16x4750 du 3/11 (vmax 0,205 contre 0,15 en fin de
+    budget, décroissance saine mais queue lente d'un réseau jammé
+    qui, en apesanteur, ne peut que dissiper)."""
     v = float("inf")
-    for _ in range(PAUSE_MAX_BLOCKS):
+    for _ in range(blocks):
         for _ in range(PAUSE_STEPS):
             p.stepSimulation(physicsClientId=client)
         v, _ = _survey(client, fibers)
@@ -460,9 +511,10 @@ def _pause_until_calm(client, fibers, verbose=True):
         if v < VPAUSE_EXIT:
             return
     raise RuntimeError(
-        f"éclat non résorbé après {PAUSE_MAX_BLOCKS * PAUSE_STEPS} pas "
+        f"éclat non résorbé après {blocks * PAUSE_STEPS} pas "
         f"plaque-fixe (vmax={v:.3f} > {VPAUSE_EXIT}) — refus d'export "
-        "d'un mat explosé : revoir --nips, incréments ou paramètres")
+        "d'un mat explosé : revoir --pause-blocks, --nips, incréments "
+        "ou paramètres")
 
 
 def _settle_until_quiet(client, fibers, runs, min_steps, budget, label):
@@ -494,10 +546,12 @@ def _settle_until_quiet(client, fibers, runs, min_steps, budget, label):
 
 
 def run_press(client, fibers, target, frict0, frict1, verbose=True,
-              zero_g=False, damping=DAMPING, nips=1):
+              zero_g=False, damping=DAMPING, nips=1,
+              pause_blocks=PAUSE_MAX_BLOCKS, max_pauses=MAX_PAUSES,
+              info=None):
     """Descente de plaque par incréments déplacés à CHAQUE PAS
     (v2.2). Rampe P1 sur toutes les fibres, gardes P2 tous les
-    GUARD_EVERY incréments.
+    GUARD_EVERY incréments (v2.7 : chaque incrément après couchage).
 
     v2.5 — multi-nips : la descente se fait en `nips` étapes vers des
     setpoints GÉOMÉTRIQUES (halving de la distance restante : les nips
@@ -510,10 +564,25 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     5x plus lente sur les derniers 100 µm, où l'énergie stockée par
     bourrage est maximale (l'éclat du 10000 seed 2 est parti de là).
 
+    v2.7 — COUCHAGE DE LA PERCOLATION : à la première dérive, la
+    gravité est restaurée (si la presse était en apesanteur) pour
+    le reste du run, et les gardes passent à CHAQUE incrément. Un
+    réseau de fibres percolé est un solide autoporteur : la fiction
+    de la phase liquide (v2.1) décrit un brouillard de fibres
+    libres, pas un mat — et en apesanteur une pause ne peut que
+    dissiper, jamais restructurer (l'incident 16x4750 du 3/11 :
+    décroissance saine 4,2 -> 0,2 mm/ms en 10 000 pas, sortie
+    manquée à 0,205 > 0,15, sur les 16 tuiles au même incrément).
+    Budgets exposés : pause_blocks (blocs de PAUSE_STEPS) et
+    max_pauses (épisodes consécutifs avant abort) ; le dict
+    optionnel `info` reçoit couchage, couchage_z, total_pauses.
+
     zero_g=True (route B) : presse en apesanteur (phase liquide), y
-    compris les consolidations inter-nips ; gravité restaurée avant
-    le test de consolidation final : le mat doit tenir la cible sous
-    son propre poids, export à l'état reposé (v2.4)."""
+    compris les consolidations inter-nips ; v2.7 : apesanteur
+    jusqu'à la première dérive, couchage ensuite ; gravité de toute
+    façon restaurée avant le test de consolidation final : le mat
+    doit tenir la cible sous son propre poids, export à l'état
+    reposé (v2.4)."""
     z_start = max(top_exact(f["center"], f["direction"], f["length"], f["radius"])
                   for f in fibers) + 0.02
     span = z_start - target
@@ -527,11 +596,16 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
           + f" mm, incréments {INCR*1e3:.0f} µm (fins {FINE_INCR*1e3:.0f} µx "
           f"sous {FINE_GAP*1e3:.0f} µm de la cible), {STEPS_PER_INCR} "
           f"pas/incr, rampe {frict0}->{frict1} "
-          f"(rolling {ROLL_START}->{ROLL_END})"
+          f"(rolling {ROLL_START}->{ROLL_END}), pauses {pause_blocks} "
+          f"x {PAUSE_STEPS} pas (max {max_pauses} épisodes)"
           + ("  [APESANTEUR — phase liquide]" if zero_g else ""))
 
     prev_above = 0
     n_pauses = 0
+    total_pauses = 0        # v2.7 : compteur global (n_pauses se réarme)
+    couchage = False        # v2.7 : gravité restaurée à la 1re dérive
+    z_couchage = None
+    guard_every = GUARD_EVERY   # v2.7 : resserré à 1 dès la 1re dérive
     t0 = time.perf_counter()
     total_incr = 0
     z_now = z_start
@@ -565,7 +639,7 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
             total_incr += 1
 
             # ---- P2 : gardes
-            if total_incr % GUARD_EVERY == 0 or z_now <= z_end + 1e-9:
+            if total_incr % guard_every == 0 or z_now <= z_end + 1e-9:
                 vmax, z_top = _survey(client, fibers)
                 n_above = sum(1 for f in fibers
                               if bottom_exact(f["pos"], f["dir"], f["length"],
@@ -579,21 +653,53 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
                 drift = vmax > VMAX_LIMIT or n_above > prev_above
                 if drift:
                     n_pauses += 1
+                    total_pauses += 1
                     print(f"  <-- DÉRIVE (vmax={vmax:.3f}, au-dessus "
                           f"{prev_above}->{n_above}) : pause plaque fixe "
-                          f"({n_pauses}/{MAX_PAUSES})")
-                    if n_pauses >= MAX_PAUSES:
+                          f"({n_pauses}/{max_pauses})")
+                    # ---- v2.7 : COUCHAGE — la 1re dérive signe la
+                    # percolation du réseau : le mat devient autoporteur.
+                    # La fiction zéro-g (v2.1) décrit un brouillard de
+                    # fibres LIBRES ; ici il n'y a plus de tête de
+                    # suspension à faire tomber (sommet = plaque,
+                    # au-dessus = 0) : restaurer la gravité ne peut pas
+                    # relancer la pluie balistique — et sans elle, un
+                    # réseau jammé ne peut que dissiper, jamais se
+                    # tasser. Les gardes passent à chaque incrément :
+                    # une avalanche prise à 25 µm d'énergie stockée
+                    # coûte des centaines de pas, pas des dizaines de
+                    # milliers.
+                    if not couchage:
+                        couchage = True
+                        z_couchage = z_now
+                        guard_every = 1
+                        if zero_g:
+                            p.setGravity(0, 0, GRAVITY,
+                                         physicsClientId=client)
+                            print(f"  COUCHAGE v2.7 : première dérive à "
+                                  f"plaque {z_now:.3f} mm — le réseau "
+                                  f"percole, le mat est autoporteur ; "
+                                  f"gravité restaurée pour le reste de la "
+                                  f"presse, gardes à chaque incrément")
+                        else:
+                            print(f"  v2.7 : première dérive à plaque "
+                                  f"{z_now:.3f} mm — gardes resserrées à "
+                                  f"chaque incrément (gravité déjà "
+                                  f"présente, route A)")
+                    if n_pauses >= max_pauses:
                         raise RuntimeError(
                             "presse divergente : la dérive persiste après "
-                            f"{MAX_PAUSES} épisodes — matériau ou paramètres "
+                            f"{max_pauses} épisodes — matériau ou paramètres "
                             "à revoir")
-                    _pause_until_calm(client, fibers, verbose)
+                    _pause_until_calm(client, fibers, verbose,
+                                      blocks=pause_blocks)
                 else:
                     n_pauses = 0
                 prev_above = n_above
 
         # ---- consolidation inter-nip : relâcher les bourrages avant
-        # le nip suivant (apesanteur conservée — phase liquide)
+        # le nip suivant (apesanteur conservée — phase liquide ; v2.7 :
+        # après couchage, la gravité restaurée est héritée ici aussi)
         if not last_nip:
             print(f"  nip {si+1}/{len(setpoints)} à {z_now:.3f} mm : "
                   f"consolidation intermédiaire (max {NIP_BUDGET} pas)")
@@ -605,16 +711,23 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     if vmax > VMAX_LIMIT:
         print(f"  <-- éclat en fin de presse (vmax={vmax:.3f} mm/ms) : "
               f"détente avant consolidation, export refusé si non résorbé")
-        _pause_until_calm(client, fibers, verbose)
+        _pause_until_calm(client, fibers, verbose, blocks=pause_blocks)
 
     # ---- test de consolidation (route B) : gravité restaurée
-    if zero_g:
+    if zero_g and not couchage:
         p.setGravity(0, 0, GRAVITY, physicsClientId=client)
         print(f"gravité restaurée : test de consolidation — "
               f"le mat doit tenir la cible ; export à l'état reposé")
+    elif zero_g and couchage:
+        print(f"gravité déjà restaurée au couchage (plaque "
+              f"{z_couchage:.3f} mm) : test de consolidation")
     _settle_until_quiet(client, fibers, runs=QUIET_RUNS,
                         min_steps=FINAL_SETTLE_MIN,
                         budget=FINAL_SETTLE_MAX, label="repos")
+    if info is not None:            # v2.7 : landmark physique du run
+        info["couchage"] = couchage
+        info["couchage_z"] = z_couchage
+        info["total_pauses"] = total_pauses
     return plate
 
 
@@ -649,6 +762,18 @@ def main():
                     help="frottement fibre-fibre en fin de presse")
     ap.add_argument("--no-walls", action="store_true",
                     help="désactiver la cage (debug uniquement)")
+    ap.add_argument("--pause-blocks", type=int, default=PAUSE_MAX_BLOCKS,
+                    help=f"v2.7 : budget de pause plaque-fixe en blocs "
+                         f"de {PAUSE_STEPS} pas (défaut {PAUSE_MAX_BLOCKS} "
+                         f"= {PAUSE_MAX_BLOCKS * PAUSE_STEPS} pas ; la "
+                         "campagne 16x4750 du 3/11 est morte à 0,205 "
+                         "contre 0,15 en fin de défaut — recommandé 60 "
+                         "en phase dense)")
+    ap.add_argument("--max-pauses", type=int, default=MAX_PAUSES,
+                    help=f"v2.7 : épisodes de dérive consécutifs avant "
+                         f"abort (défaut {MAX_PAUSES}) ; après couchage, "
+                         "une avalanche = une pause, c'est l'opération "
+                         "normale : 50 en campagne")
     ap.add_argument("--out", default=None, help="fichier de sortie")
     args = ap.parse_args()
 
@@ -661,6 +786,10 @@ def main():
     if not (0.0 <= args.overlap_tol <= OVERLAP_TOL_MAX):
         ap.error(f"--overlap-tol dans [0, {OVERLAP_TOL_MAX}] mm "
                  f"(recommandé : 0.003)")
+    if args.pause_blocks < 1:
+        ap.error("--pause-blocks >= 1")
+    if args.max_pauses < 1:
+        ap.error("--max-pauses >= 1")
 
     client = p.connect(p.DIRECT)
     p.setGravity(0, 0, GRAVITY, physicsClientId=client)  # mm/ms²
@@ -757,9 +886,11 @@ def main():
               f"la presse")
 
     # ----------------------------- presse -----------------------------
+    info = {}                # v2.7 : couchage + hauteur de percolation
     run_press(client, fibers, args.target, args.frict0, args.frict1,
               zero_g=zero_g, damping=LIQUID_DAMPING if zero_g else DAMPING,
-              nips=args.nips)
+              nips=args.nips, pause_blocks=args.pause_blocks,
+              max_pauses=args.max_pauses, info=info)
 
     # ----------------------------- export -----------------------------
     _survey(client, fibers)          # dernier état : pos/dir à jour
@@ -781,6 +912,9 @@ def main():
               target=args.target, nips=args.nips,
               overlap_tol=(args.overlap_tol if args.random is not None
                            else None),
+              pause_blocks=args.pause_blocks, max_pauses=args.max_pauses,
+              couchage=bool(info.get("couchage", False)),
+              couchage_z=info.get("couchage_z"),
               frict0=args.frict0, frict1=args.frict1,
               walls=walls_built, escaped=escaped, source=source)
 
@@ -788,6 +922,9 @@ def main():
                       for c, d, L, r, ck in zip(centers, directions,
                                                 lengths, radii, core)
                       if ck), default=0.0)
+    if info.get("couchage"):
+        print(f"couchage : percolation à plaque {info['couchage_z']:.3f} "
+              f"mm, {info.get('total_pauses', 0)} pauses au total")
     print(f"=== {len(fibers)} fibres pressées, {escaped} hors domaine, "
           f"hauteur finale {z_top_core:.3f} mm -> {out} ===")
     if z_top_core > args.target * 1.05:

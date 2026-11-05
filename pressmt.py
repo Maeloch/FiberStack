@@ -1,5 +1,20 @@
 """
-pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.4, route B).
+pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.5, route B).
+
+v1.5 : ISOLEMENT DES TUILLES + COUCHAGE (press v2.7). Incident du
+3/11 : campagne 16x4750 box 6 tol 0 — à l'incr 200 (plaque ~1,02 mm,
+phi ~5,8 %) les 16 tuiles dérivent SIMULTANÉMENT : le réseau de
+fibres percole (vmax 0,4-4,2, zéro fibre au-dessus de la plaque).
+La garde fait son travail, mais UNE tuile restée à 0,205 mm/ms
+après 10 000 pas plaque-fixe lève RuntimeError -> pool.imap_unordered
+-> le with-block TUE les 15 tuiles saines encore en pause : ~20 h de
+presse, ZÉRO export. Dorénavant le worker capture l'échec et rend
+un compte-rendu : les survivantes s'exportent, l'exit code porte
+l'échec (tuiles échouées à relancer une à une après diagnostic —
+elles sont déterministes). Plomberie --pause-blocks / --max-pauses
+(press v2.7) jusqu'au worker ; couchage (gravité dès la première
+dérive) et couchage_z (hauteur de percolation) stockés dans le npz
+de tuile.
 
 v1.4 : plomberie --overlap-tol (press v2.6) — tolérance de
 chevauchement initial au placement, bornée (cap 6 µm = moitié du
@@ -62,8 +77,9 @@ Vues d'ensemble :
     construit est dimensionnée sur le domaine 10×10 (12×12 mm) et
     déborde sur les murs de la tuile — sans conséquence (statique vs
     cinématique : aucun contact résolu). Les gardes, la rampe P1 et
-    le test de consolidation restent ceux du press v2.5 (v1.3 : le
-    --nips de la v2.5 est passé tel quel au worker).
+    le test de consolidation restent ceux du press v2.7 (v1.3 : le
+    --nips est passé tel quel au worker ; v1.5 : --pause-blocks,
+    --max-pauses et le dict couchage aussi).
 
 Coûts attendus (à 10 000 fibres) : la phase chère est la compaction
 dense, dont le coût par pas suit ~le nombre de contacts -> une tuile
@@ -76,6 +92,11 @@ Usage :
     python pressMT.py --random 10000 --seed 2 --target 0.3
     python pressMT.py --random 10000 --seed 2 --nx 2 --ny 2 \
         --box-z 1.5 --burn-in 1.25 --workers 4
+    # pilote phase dense (v1.5 + press v2.7) : la tuile (0,0) partage
+    # le flux RNG (seed, 0, 0) avec la tuile (0,0) de la campagne de
+    # même seed — placement identique, presse comparable à l'incr 200 :
+    python pressMT.py --random 4750 --seed 2 --nx 1 --ny 1 --box-z 6 \
+        --pause-blocks 60 --max-pauses 50 --workers 1 --outdir pilote_c569
 
 Validation croisées (AVANT de croire l'ensemble) :
     1. une tuile seule vs le monolith : profil de porosité du cœur
@@ -89,9 +110,10 @@ Validation croisées (AVANT de croire l'ensemble) :
        géométrie de la tuile (métadonnées tile_* dans le npz).
 
 Système d'unités : (mm, mg, ms). Nécessite : pybullet, numpy, scipy.
-REQUIERT le press.py déployé (v2.6) importable sans effet de bord
-(garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.4
-exige press.OVERLAP_TOL_MAX, absent de la v2.5).
+REQUIERT le press.py déployé (v2.7) importable sans effet de bord
+(garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.5
+exige run_press(pause_blocks=..., max_pauses=..., info=...), qui
+n'existe qu'à partir de la v2.7).
 """
 
 import argparse
@@ -242,9 +264,11 @@ def quiet_consolidate(client, fibers, min_steps=1000, max_steps=10000,
     print("    AVERTISSEMENT : silence non atteint dans le budget de pas")
 
 
-def export_tile(client, fibers, job):
+def export_tile(client, fibers, job, info=None):
     """Export au contrat unifié : route=press + géométrie de la tuile.
-    Coordonnées LOCALES à la tuile ; core = zone utile après rebut."""
+    Coordonnées LOCALES à la tuile ; core = zone utile après rebut.
+    v1.5 : couchage et couchage_z (hauteur de percolation — grandeur
+    physique du mat) passés au npz via le dict `info` de run_press."""
     press._survey(client, fibers)          # dernier état : pos/dir à jour
     half = job["tile_side"] / 2.0
     half_core = half - job["burn_in"]
@@ -261,10 +285,18 @@ def export_tile(client, fibers, job):
               seed=job["seed"], n_total=job["n_tile"], n_actual=len(fibers),
               target=job["target"], frict0=job["frict0"], frict1=job["frict1"],
               overlap_tol=job.get("overlap_tol", 0.0),
+              pause_blocks=job.get("pause_blocks", press.PAUSE_MAX_BLOCKS),
+              max_pauses=job.get("max_pauses", press.MAX_PAUSES),
+              couchage=bool(info.get("couchage", False)) if info else False,
+              couchage_z=info.get("couchage_z") if info else None,
               walls=True, escaped=0, pressmt=1,
               tile_ix=job["ix"], tile_iy=job["iy"],
               tile_side=job["tile_side"], burn_in=job["burn_in"])
     n_core = sum(core)
+    if info and info.get("couchage"):
+        print(f"    tuile ({job['ix']},{job['iy']}) : couchage à plaque "
+              f"{info['couchage_z']:.3f} mm, "
+              f"{info.get('total_pauses', 0)} pauses au total")
     print(f"=== tuile ({job['ix']},{job['iy']}) : {len(fibers)} pressées, "
           f"{n_core} en zone utile ({2 * half_core:.2f} mm de côté) "
           f"-> {job['out']} ===")
@@ -274,10 +306,28 @@ def export_tile(client, fibers, job):
 
 def worker_tile(job):
     """Un monde pybullet complet pour une tuile. job = dict simple
-    (picklable). Semence par tuile : (seed, ix, iy) -> SeedSequence."""
+    (picklable). Semence par tuile : (seed, ix, iy) -> SeedSequence.
+    v1.5 : ISOLEMENT — une tuile qui lève (garde de placement,
+    budget de pause épuisé, éclat de fin de presse) rend un
+    compte-rendu d'échec au lieu de tuer le pool : les autres
+    tuiles continuent et s'exportent (l'incident du 3/11 a perdu
+    ~20 h de presse sur 15 tuiles saines à cause d'UNE tuile)."""
     ix, iy = job["ix"], job["iy"]
     rng = np.random.default_rng((job["seed"], ix, iy))
     client = p.connect(p.DIRECT)
+    try:
+        return _worker_run(job, rng, client, ix, iy)
+    except Exception as e:               # v1.5 : isolation de tuile
+        return dict(ix=ix, iy=iy, status="failed",
+                    error=f"{type(e).__name__}: {e}", out=job["out"])
+    finally:
+        p.disconnect(physicsClientId=client)
+
+
+def _worker_run(job, rng, client, ix, iy):
+    """Corps du worker (v1.5) — séparé de worker_tile pour que
+    l'isolation couvre TOUT : placement, pré-relaxation, presse,
+    consolidation, export."""
     p.setGravity(0, 0, 0.0, physicsClientId=client)     # apesanteur route B
     p.setPhysicsEngineParameter(fixedTimeStep=press.DT,
                                 numSubSteps=press.NUM_SUBSTEPS,
@@ -307,9 +357,8 @@ def worker_tile(job):
               f"{n_failed} échecs "
               f"({100.0 * n_failed / max(1, job['n_tile']):.1f} %), "
               f"brouillard {dens:.1f} fibres/mm³")
-        p.disconnect(physicsClientId=client)
-        return dict(ix=ix, iy=iy, n=len(fibers), failed=n_failed,
-                    place_only=True)
+        return dict(ix=ix, iy=iy, status="ok", n=len(fibers),
+                    failed=n_failed, place_only=True)
     if n_failed > max(1, int(0.01 * job["n_tile"])):
         raise RuntimeError(f"tuile ({ix},{iy}) : {n_failed} échecs de "
                            f"placement (> 1 %) — brouillard trop dense : "
@@ -321,13 +370,18 @@ def worker_tile(job):
     print(f"tuile ({ix},{iy}) : {len(fibers)} fibres, pré-relaxation "
           f"{press.PRELAX_STEPS} pas ({time.perf_counter() - t0:.0f} s)")
 
+    info = {}                 # v1.5 : couchage + hauteur de percolation
     press.run_press(client, fibers, job["target"], job["frict0"],
                     job["frict1"], verbose=True, zero_g=True,
-                    damping=press.LIQUID_DAMPING, nips=job.get("nips", 1))
+                    damping=press.LIQUID_DAMPING, nips=job.get("nips", 1),
+                    pause_blocks=job.get("pause_blocks",
+                                        press.PAUSE_MAX_BLOCKS),
+                    max_pauses=job.get("max_pauses", press.MAX_PAUSES),
+                    info=info)
     quiet_consolidate(client, fibers)
-    export_tile(client, fibers, job)
-    p.disconnect(physicsClientId=client)
-    return dict(ix=ix, iy=iy, n=len(fibers), failed=n_failed, out=job["out"])
+    export_tile(client, fibers, job, info)
+    return dict(ix=ix, iy=iy, status="ok", n=len(fibers),
+                failed=n_failed, out=job["out"])
 
 
 # ------------------------------------------------------------ main
@@ -350,6 +404,17 @@ def main():
                          "recommandé 0.003 = ~0,3 rayon ; cap "
                          f"{press.OVERLAP_TOL_MAX}). Résolue par la "
                          "pré-relaxation ; calibrer au --place-only.")
+    ap.add_argument("--pause-blocks", type=int,
+                    default=press.PAUSE_MAX_BLOCKS,
+                    help=f"v2.7 : budget de pause plaque-fixe en blocs "
+                         f"de {press.PAUSE_STEPS} pas (défaut "
+                         f"{press.PAUSE_MAX_BLOCKS} ; recommandé 60 en "
+                         "phase dense)")
+    ap.add_argument("--max-pauses", type=int, default=press.MAX_PAUSES,
+                    help=f"v2.7 : épisodes de dérive consécutifs avant "
+                         f"abort (défaut {press.MAX_PAUSES}) ; après "
+                         "couchage une avalanche = une pause, c'est "
+                         "l'opération normale : 50 en campagne")
     ap.add_argument("--frict0", type=float, default=press.F0_DEFAULT,
                     help="début de rampe (défauts du press, NE PAS écraser)")
     ap.add_argument("--frict1", type=float, default=press.F1_DEFAULT,
@@ -374,6 +439,10 @@ def main():
     if not (0.0 <= args.overlap_tol <= press.OVERLAP_TOL_MAX):
         raise SystemExit(f"--overlap-tol dans [0, {press.OVERLAP_TOL_MAX}] "
                          f"mm (recommandé : 0.003)")
+    if args.pause_blocks < 1:
+        raise SystemExit("--pause-blocks >= 1")
+    if args.max_pauses < 1:
+        raise SystemExit("--max-pauses >= 1")
 
     n_tiles = args.nx * args.ny
     n_tile = args.random // n_tiles
@@ -389,7 +458,9 @@ def main():
                              box_z=args.box_z, burn_in=args.burn_in,
                              target=args.target, frict0=args.frict0,
                              frict1=args.frict1, nips=args.nips,
-                             overlap_tol=args.overlap_tol, out=out,
+                             overlap_tol=args.overlap_tol,
+                             pause_blocks=args.pause_blocks,
+                             max_pauses=args.max_pauses, out=out,
                              place_only=args.place_only))
             k += 1
 
@@ -400,17 +471,38 @@ def main():
           f"{args.tile_side}x{args.tile_side}x{args.box_z} mm "
           f"({fog:.1f} fibres/mm³), tolérance placement "
           f"{args.overlap_tol*1e3:.1f} µm, {w} workers, "
-          f"rampe {args.frict0}->{args.frict1}")
+          f"rampe {args.frict0}->{args.frict1}, pauses "
+          f"{args.pause_blocks}x{press.PAUSE_STEPS} pas "
+          f"(max {args.max_pauses} épisodes)")
     if fog > 15.0:
         print("ATTENTION : brouillard au-delà des densités validées "
               "(6,7-12,5 fibres/mm³) — jamming RSA possible. Sonder "
               "avec --place-only ; sinon augmenter --box-z.")
     t0 = time.perf_counter()
+    ok, failed = [], []                        # v1.5 : tuiles isolées
     ctx = multiprocessing.get_context("spawn")   # jamais fork avec pybullet
     with ctx.Pool(processes=w) as pool:
         for res in pool.imap_unordered(worker_tile, jobs):
-            print(f"[{time.perf_counter() - t0:7.0f} s] tuile finie : {res}")
-    print(f"=== pressMT terminé en {time.perf_counter() - t0:.0f} s ===")
+            t = time.perf_counter() - t0
+            if res.get("place_only"):
+                print(f"[{t:7.0f} s] sonde : {res}")
+                continue
+            if res.get("status") == "failed":
+                failed.append(res)
+                print(f"[{t:7.0f} s] ÉCHEC tuile ({res['ix']},{res['iy']}) : "
+                      f"{res['error']} — les autres tuiles continuent")
+            else:
+                ok.append(res)
+                print(f"[{t:7.0f} s] tuile finie : {res}")
+    print(f"=== pressMT terminé en {time.perf_counter() - t0:.0f} s : "
+          f"{len(ok)} tuile(s) exportée(s), {len(failed)} échec(s) ===")
+    if failed:
+        raise SystemExit(
+            f"pressMT : {len(failed)} tuile(s) en échec — les survivantes "
+            "sont exportées ; une tuile échouée est DÉTERMINISTE (même "
+            "commande = même échec) : diagnostiquer son log, ajuster "
+            "--pause-blocks/--max-pauses ou la physique, puis la relancer "
+            "seule")
 
 
 if __name__ == "__main__":
