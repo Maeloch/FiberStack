@@ -110,10 +110,11 @@ Validation croisées (AVANT de croire l'ensemble) :
        géométrie de la tuile (métadonnées tile_* dans le npz).
 
 Système d'unités : (mm, mg, ms). Nécessite : pybullet, numpy, scipy.
-REQUIERT le press.py déployé (v2.7) importable sans effet de bord
+REQUIERT le press.py déployé (v2.8) importable sans effet de bord
 (garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.5
 exige run_press(pause_blocks=..., max_pauses=..., info=...), qui
-n'existe qu'à partir de la v2.7).
+n'existe qu'à partir de la v2.7 ; le CODE_VERSION 2.8 et le critère
+de pause par surface transitent seuls via press).
 """
 
 import argparse

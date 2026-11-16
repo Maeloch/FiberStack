@@ -10,6 +10,32 @@ Deux routes :
      phase liquide de fabrication : fibres réparties dans un volume,
      puis pressées — pas de dépôt gravitaire du tout).
 
+v2.8 — LE REPOS D'UN MAT QUI CONSOLIDE (pilote v2.7 du 12-13/11) :
+     le couchage a fait son travail — première dérive EXACTEMENT à
+     la profondeur de la campagne (plaque 1,019 mm ; 16/16 tuiles +
+     pilote : l'onset de percolation est mesuré trois fois au même
+     endroit) — mais la pause n'est JAMAIS sortie : 60 blocs
+     (24 000 pas, ~20 h) à vmax 0,17-1,9 mm/ms SANS décroissance,
+     abort au budget. Cause quantitative : sous gravité et
+     frottement liquide (5 %/ms, tau = 20 ms), une fibre qui se
+     dépose dans un pore a une vitesse terminale g·tau ≈ 0,196
+     mm/ms — AU-DESSUS du seuil de sortie VPAUSE_EXIT = 0,15 : le
+     critère vmax est mathématiquement inatteignable tant qu'une
+     seule fibre se dépose. Et le mat qui se restructure est
+     bruyant (chaînes qui flambent, pointes à 1,9) : c'est le
+     mécanisme voulu, pas un éclat. LE REPOS D'UN MAT EN COURS DE
+     COUCHAGE SE LIT SUR SA SURFACE, pas sur les vitesses
+     individuelles : sortie de pause quand (aucune fibre au-dessus
+     de la plaque) ET vmax < VMAX_LIMIT (pas d'avalanche majeure)
+     ET sommet stable (< PAUSE_DZ_EXIT par bloc) pendant
+     PAUSE_STABLE blocs consécutifs. En apesanteur (pas de
+     couchage), l'ancien critère vmax reste en vigueur. run_press
+     passe z_plate à _pause_until_calm. Hypothèse rivale déclarée
+     (si la surface ne se stabilise jamais au pilote v2.8) :
+     artefact solveur — pénétrations résiduelles 15-25 µm relues
+     sous charge gravitaire + splitImpulse ; parade alors :
+     damping majoré pendant les pauses, ou itérations solveur.
+
 v2.7 — LE COUCHAGE DE LA PERCOLATION (incident du 3/11 : campagne
      16x4750 box 6 tol 0, ~20 h). Presse stable de l'incr 20 à 180
      (plaque 5,52 -> 1,52 mm, vmax 0,07-0,09 = la vitesse de la
@@ -150,7 +176,7 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, BUFFER_MARGIN,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 2.7
+CODE_VERSION = 2.8
 
 # presse
 INCR = 0.025               # mm par incrément de descente
@@ -164,7 +190,15 @@ PAUSE_MAX_BLOCKS = 25      # v2.5 : budget de pause ; v2.7 : DÉFAUT de
                            # campagne 16x4750 du 3/11 est morte à 0,205
                            # contre 0,15 en fin de budget : en phase
                            # dense le budget se négocie en CLI, pas en dur)
-VPAUSE_EXIT = 0.15         # v2.5 : sortie de pause (plaque ~0,06 + marge)
+VPAUSE_EXIT = 0.15         # v2.5 : sortie de pause en APESANTEUR
+                           # (plaque ~0,06 + marge). v2.8 : sous gravité
+                           # (couchage) ce seuil est SOUS la vitesse
+                           # terminale de dépôt (g·tau ≈ 0,196 mm/ms à
+                           # 5 %/ms) — inatteignable ; le critère de
+                           # sortie devient la stabilité de SURFACE
+PAUSE_DZ_EXIT = 0.005      # v2.8 : descente max du sommet par bloc de
+                           # pause (400 pas) pour déclarer le mat consolidé
+PAUSE_STABLE = 3           # v2.8 : blocs consécutifs de sommet stable exigés
 GUARD_EVERY = 20           # P2 : contrôle tous les N incréments
 VMAX_LIMIT = 0.25          # mm/ms = 4x la vitesse de descente de la plaque
 MAX_PAUSES = 3             # P2 : abort si la dérive persiste ; v2.7 :
@@ -488,33 +522,63 @@ def _survey(client, fibers):
     return vmax, z_top
 
 
-def _pause_until_calm(client, fibers, verbose=True, blocks=PAUSE_MAX_BLOCKS):
-    """v2.5 : remplace la pause fixe (v2.4 : 400 pas sans re-contrôle,
-    reprise aveugle). Pauses par blocs de PAUSE_STEPS pas avec
-    re-contrôle à chaque bloc, sortie quand vmax < VPAUSE_EXIT ;
+def _pause_until_calm(client, fibers, verbose=True, blocks=PAUSE_MAX_BLOCKS,
+                      z_plate=None):
+    """v2.5 : pauses par blocs de PAUSE_STEPS pas re-contrôlés,
     RuntimeError au budget épuisé — un éclat non résorbé ne doit pas
-    couler vers l'export (le run 10000 seed 2 est mort exactement
-    comme ça : vmax 16 mm/ms au dernier incrément, exporté quand
-    même). v2.7 : le budget devient un PARAMÈTRE (blocks) exposé en
-    CLI — le défaut 25 x 400 = 10 000 pas a échoué de 37 % sur la
-    campagne 16x4750 du 3/11 (vmax 0,205 contre 0,15 en fin de
-    budget, décroissance saine mais queue lente d'un réseau jammé
-    qui, en apesanteur, ne peut que dissiper)."""
+    couler vers l'export (le run 10000 seed 2 : vmax 16 mm/ms au
+    dernier incrément, exporté quand même). v2.7 : le budget devient
+    un paramètre (blocks) exposé en CLI. v2.8 : DEUX critères de
+    sortie selon le régime. En apesanteur (z_plate=None) : vmax <
+    VPAUSE_EXIT, comme en v2.5-v2.7. Sous gravité (couchage, z_plate
+    fourni) : le critère vmax est INATTEIGNABLE — une fibre qui se
+    dépose dans un pore a une vitesse terminale g·tau ≈ 0,196 mm/ms
+    > VPAUSE_EXIT (le pilote 12-13/11 a tenu 60 blocs à 0,17-1,9
+    mm/ms sans décroître) — le repos se lit sur la SURFACE du mat :
+    aucune fibre au-dessus de la plaque, vmax < VMAX_LIMIT (pas
+    d'avalanche majeure en cours), et sommet stable à PAUSE_DZ_EXIT
+    près pendant PAUSE_STABLE blocs consécutifs."""
     v = float("inf")
+    stable = 0
+    z_top_prev = None
     for _ in range(blocks):
         for _ in range(PAUSE_STEPS):
             p.stepSimulation(physicsClientId=client)
-        v, _ = _survey(client, fibers)
+        v, z_top = _survey(client, fibers)
         if verbose:
-            print(f"    pause plaque fixe : vmax={v:.3f} mm/ms "
-                  f"(sortie sous {VPAUSE_EXIT})")
-        if v < VPAUSE_EXIT:
-            return
+            crit = (f"sortie sous {VPAUSE_EXIT}" if z_plate is None
+                    else f"sortie : surface stable ({PAUSE_STABLE} blocs, "
+                         f"{PAUSE_DZ_EXIT*1e3:.0f} µm/bloc)")
+            print(f"    pause plaque fixe : vmax={v:.3f} mm/ms, sommet "
+                  f"z={z_top:.3f} mm ({crit})")
+        if z_plate is None:
+            if v < VPAUSE_EXIT:
+                return
+        else:
+            n_above = sum(1 for f in fibers
+                          if bottom_exact(f["pos"], f["dir"], f["length"],
+                                          f["radius"]) > z_plate + 0.02)
+            if z_top_prev is None:
+                z_top_prev = z_top     # 1er bloc : référence, pas de test
+                continue
+            dz = abs(z_top - z_top_prev)
+            z_top_prev = z_top
+            if n_above == 0 and v < VMAX_LIMIT and dz < PAUSE_DZ_EXIT:
+                stable += 1
+                if stable >= PAUSE_STABLE:
+                    print(f"    pause : mat consolidé (sommet stable à "
+                          f"{dz*1e3:.1f} µm près, {stable} blocs, "
+                          f"vmax={v:.3f})")
+                    return
+            else:
+                stable = 0
+    crit = ("vmax < " + str(VPAUSE_EXIT) if z_plate is None
+            else "surface stable")
     raise RuntimeError(
-        f"éclat non résorbé après {blocks * PAUSE_STEPS} pas "
-        f"plaque-fixe (vmax={v:.3f} > {VPAUSE_EXIT}) — refus d'export "
-        "d'un mat explosé : revoir --pause-blocks, --nips, incréments "
-        "ou paramètres")
+        f"pause non résorbée après {blocks * PAUSE_STEPS} pas "
+        f"plaque-fixe (vmax={v:.3f}, critère {crit} non atteint) — "
+        "refus d'export d'un mat non apaisé : revoir --pause-blocks, "
+        "--nips, incréments ou paramètres")
 
 
 def _settle_until_quiet(client, fibers, runs, min_steps, budget, label):
@@ -576,6 +640,11 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     Budgets exposés : pause_blocks (blocs de PAUSE_STEPS) et
     max_pauses (épisodes consécutifs avant abort) ; le dict
     optionnel `info` reçoit couchage, couchage_z, total_pauses.
+    v2.8 : les pauses sous couchage sortent sur la STABILITÉ DE
+    SURFACE du mat, pas sur vmax — sous gravité, une fibre qui se
+    dépose dans un pore a une vitesse terminale (~0,196 mm/ms)
+    supérieure au seuil vmax : critère inatteignable (voir
+    _pause_until_calm).
 
     zero_g=True (route B) : presse en apesanteur (phase liquide), y
     compris les consolidations inter-nips ; v2.7 : apesanteur
@@ -692,7 +761,7 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
                             f"{max_pauses} épisodes — matériau ou paramètres "
                             "à revoir")
                     _pause_until_calm(client, fibers, verbose,
-                                      blocks=pause_blocks)
+                                      blocks=pause_blocks, z_plate=z_now)
                 else:
                     n_pauses = 0
                 prev_above = n_above
@@ -711,7 +780,8 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     if vmax > VMAX_LIMIT:
         print(f"  <-- éclat en fin de presse (vmax={vmax:.3f} mm/ms) : "
               f"détente avant consolidation, export refusé si non résorbé")
-        _pause_until_calm(client, fibers, verbose, blocks=pause_blocks)
+        _pause_until_calm(client, fibers, verbose, blocks=pause_blocks,
+                          z_plate=z_now)
 
     # ---- test de consolidation (route B) : gravité restaurée
     if zero_g and not couchage:
