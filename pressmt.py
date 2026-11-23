@@ -1,5 +1,19 @@
 """
-pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.5, route B).
+pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.6, route B).
+
+v1.6 : plomberie --couchage-damping et --vmax-explode (press v3.0)
++ ÉCONOMIE DE PILOTE. La leçon du 14-16/11 : chaque pilote 4750
+coûte 32 h et n'apporte qu'un verdict ; la transition du couchage
+est une transition en PHI — un mini-run de 500 fibres vers
+--target 0.10 la traverse en 1-4 h. Pour itérer les parades, passer
+par les minis (même seed, même déterminisme), et ne remonter au
+pilote 4750 qu'après un mini VERT. Depuis press v2.9, on PRESSE À
+TRAVERS le fluage (avalanches sous --vmax-explode = pas de pause) ;
+le recensement (press v3.0, _hot_census) imprime dans chaque bloc
+de pause sous couchage combien de fibres bougent, la vitesse de la
+pire et son altitude : discriminateur entre fluage de consolidation
+(population qui se vide) et moteur de correction solveur
+(population stationnaire).
 
 v1.5 : ISOLEMENT DES TUILLES + COUCHAGE (press v2.7). Incident du
 3/11 : campagne 16x4750 box 6 tol 0 — à l'incr 200 (plaque ~1,02 mm,
@@ -110,11 +124,10 @@ Validation croisées (AVANT de croire l'ensemble) :
        géométrie de la tuile (métadonnées tile_* dans le npz).
 
 Système d'unités : (mm, mg, ms). Nécessite : pybullet, numpy, scipy.
-REQUIERT le press.py déployé (v2.8) importable sans effet de bord
-(garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.5
-exige run_press(pause_blocks=..., max_pauses=..., info=...), qui
-n'existe qu'à partir de la v2.7 ; le CODE_VERSION 2.8 et le critère
-de pause par surface transitent seuls via press).
+REQUIERT le press.py déployé (v3.0) importable sans effet de bord
+(garde __main__ ; vérifier : grep -n "__main__" press.py ; la v1.6
+exige run_press(couchage_damping=...) et press._hot_census, qui
+n'existent qu'à partir de la v3.0).
 """
 
 import argparse
@@ -290,6 +303,8 @@ def export_tile(client, fibers, job, info=None):
               max_pauses=job.get("max_pauses", press.MAX_PAUSES),
               couchage=bool(info.get("couchage", False)) if info else False,
               couchage_z=info.get("couchage_z") if info else None,
+              couchage_damping=job.get("couchage_damping", 0.0),
+              vmax_explode=job.get("vmax_explode", press.VMAX_EXPLODE),
               walls=True, escaped=0, pressmt=1,
               tile_ix=job["ix"], tile_iy=job["iy"],
               tile_side=job["tile_side"], burn_in=job["burn_in"])
@@ -378,7 +393,10 @@ def _worker_run(job, rng, client, ix, iy):
                     pause_blocks=job.get("pause_blocks",
                                         press.PAUSE_MAX_BLOCKS),
                     max_pauses=job.get("max_pauses", press.MAX_PAUSES),
-                    info=info)
+                    info=info,
+                    couchage_damping=job.get("couchage_damping", 0.0),
+                    vmax_explode=job.get("vmax_explode",
+                                        press.VMAX_EXPLODE))
     quiet_consolidate(client, fibers)
     export_tile(client, fibers, job, info)
     return dict(ix=ix, iy=iy, status="ok", n=len(fibers),
@@ -413,9 +431,21 @@ def main():
                          "phase dense)")
     ap.add_argument("--max-pauses", type=int, default=press.MAX_PAUSES,
                     help=f"v2.7 : épisodes de dérive consécutifs avant "
-                         f"abort (défaut {press.MAX_PAUSES}) ; après "
-                         "couchage une avalanche = une pause, c'est "
-                         "l'opération normale : 50 en campagne")
+                         f"abort (défaut {press.MAX_PAUSES}) ; v2.9 : "
+                         "sous couchage ils ne tombent que sur évasion "
+                         "ou explosion : 50 en campagne")
+    ap.add_argument("--couchage-damping", type=float, default=0.0,
+                    help="v1.6 : frein optionnel au couchage (0 = off). "
+                         "Sous la philosophie v2.9, les avalanches SONT "
+                         "le mécanisme : à n'activer que si le plafond "
+                         "dur devient trop fréquent en campagne")
+    ap.add_argument("--vmax-explode", type=float,
+                    default=press.VMAX_EXPLODE,
+                    help="v2.9 : plafond dur en phase couchée (mm/ms) ; "
+                         "les avalanches sous ce plafond sont le fluage "
+                         "plastique, on presse à travers ; pause+abort "
+                         f"au-delà ou sur évasion (défaut "
+                         f"{press.VMAX_EXPLODE})")
     ap.add_argument("--frict0", type=float, default=press.F0_DEFAULT,
                     help="début de rampe (défauts du press, NE PAS écraser)")
     ap.add_argument("--frict1", type=float, default=press.F1_DEFAULT,
@@ -444,6 +474,10 @@ def main():
         raise SystemExit("--pause-blocks >= 1")
     if args.max_pauses < 1:
         raise SystemExit("--max-pauses >= 1")
+    if not (0.0 <= args.couchage_damping < 1.0):
+        raise SystemExit("--couchage-damping dans [0, 1[")
+    if args.vmax_explode <= 0.0:
+        raise SystemExit("--vmax-explode > 0")
 
     n_tiles = args.nx * args.ny
     n_tile = args.random // n_tiles
@@ -461,7 +495,10 @@ def main():
                              frict1=args.frict1, nips=args.nips,
                              overlap_tol=args.overlap_tol,
                              pause_blocks=args.pause_blocks,
-                             max_pauses=args.max_pauses, out=out,
+                             max_pauses=args.max_pauses,
+                             couchage_damping=args.couchage_damping,
+                             vmax_explode=args.vmax_explode,
+                             out=out,
                              place_only=args.place_only))
             k += 1
 
@@ -474,7 +511,9 @@ def main():
           f"{args.overlap_tol*1e3:.1f} µm, {w} workers, "
           f"rampe {args.frict0}->{args.frict1}, pauses "
           f"{args.pause_blocks}x{press.PAUSE_STEPS} pas "
-          f"(max {args.max_pauses} épisodes)")
+          f"(max {args.max_pauses} épisodes), damping couchage "
+          f"{args.couchage_damping}, plafond couché "
+          f"{args.vmax_explode} mm/ms")
     if fog > 15.0:
         print("ATTENTION : brouillard au-delà des densités validées "
               "(6,7-12,5 fibres/mm³) — jamming RSA possible. Sonder "

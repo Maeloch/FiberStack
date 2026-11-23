@@ -10,6 +10,57 @@ Deux routes :
      phase liquide de fabrication : fibres réparties dans un volume,
      puis pressées — pas de dépôt gravitaire du tout).
 
+v2.9 — PRESSE À TRAVERS LE FLUAGE (pilote v2.8 du 13-19/11) : le
+     critère de surface n'a JAMAIS sorti la pause — 60 blocs encore
+     sans décroissance (0,17-1,9 mm/ms, sommet oscillant ±15 µm,
+     y compris vers le HAUT : restructurations, pas dépôt ;
+     trajectoire vmax bit-à-bit identique à la v2.7, déterminisme
+     total). Verdict : un empilement granulaire précontraint qui se
+     consolide sous charge flue LOGARITHMIQUEMENT — le repos
+     n'existe à aucun budget (tassement des grains, compaction en
+     log t sur 10^5 taps) ; attendre le calme est inobservable ET
+     inabordable (20 h de pause pour rien, deux fois, 64 h de
+     pilote au total). CONTREPREUVE IMPORTANTE (écarte l'hypothèse
+     artefact solveur) : settle.py atteint un repos VRAI sous
+     gravité (vmax 0,0012, monolithe v2.5) — le critère de repos
+     garde un sens en FIN de presse ; c'est en COURS de
+     consolidation d'un réseau précontraint qu'il n'en a pas.
+     CHANGEMENT DE PHILOSOPHIE : les avalanches sous le plafond dur
+     VMAX_EXPLODE (défaut 5,0 mm/ms ; observées 0,4-1,9 ; l'explosion
+     réelle du 10000 : 16) sont le FLUAGE PLASTIQUE du mat — le
+     mécanisme même de la densification, ce que fait une vraie
+     calandre en pressant SANS S'ARRÊTER. On presse à travers ;
+     seules une évasion (fibre au-dessus de la plaque) ou une
+     explosion (> VMAX_EXPLODE, --vmax-explode) déclenchent une
+     pause (critère surface v2.8) puis l'abort. La qualité de
+     l'export reste gardée par ÉTAGES : pas d'évasion (contrôle à
+     chaque incrément), plafond dur, test de consolidation final
+     sous gravité, VQUIET à l'export, validate en aval. En phase
+     diluée (avant couchage), rien ne change.
+
+v3.0 — CENSUS DU FLUAGE + FREIN OPTIONNEL (fusion atelier/repo) :
+     la philosophie v2.9 reprise TELLE QUELLE (presser à travers,
+     plafond dur, gardes par étages). Contributions v3.0 :
+     (1) RECENSEMENT (_hot_census, dans chaque bloc de pause sous
+     couchage) : combien de fibres dépassent VPAUSE_EXIT, vitesse
+     de la pire et son altitude, altitude moyenne des agitées —
+     discriminateur à lire au mini avant d'extrapoler : un fluage
+     de consolidation se VIDE (population agitée décroissante,
+     événements qui fatiguent) ; un moteur de correction solveur
+     reste STATIONNAIRE en masse et en énergie. Prudence revendiquée
+     sur la lecture v2.9 : la contre-preuve settle.py est forte,
+     mais le sommet non monotone (+15 µm) et des événements à 1,9
+     non fatigués après 48 ms gardent la question ouverte — le
+     census tranche.
+     (2) --couchage-damping : frein optionnel, DÉFAUT 0 (off — sous
+     la philosophie v2.9, les avalanches SONT le mécanisme) ; à
+     n'activer que si le plafond dur devient trop fréquent en
+     campagne (il réduit v_t = g/(-ln(1-d)) : 0,7 -> ~0,008 mm/ms).
+     (3) DOCTRINE MINI-REPRO : la transition est en phi, pas en h —
+     500 fibres vers --target 0.10 traversent phi ≈ 6 % en 1-4 h ;
+     itérer les parades AU MINI (même seed, déterminisme), pilote
+     4750 seulement après mini VERT.
+
 v2.8 — LE REPOS D'UN MAT QUI CONSOLIDE (pilote v2.7 du 12-13/11) :
      le couchage a fait son travail — première dérive EXACTEMENT à
      la profondeur de la campagne (plaque 1,019 mm ; 16/16 tuiles +
@@ -176,7 +227,7 @@ from structure import (DOMAIN_SIDE, MEASURE_SIDE, BUFFER_MARGIN,
 
 # ------------------------------------------------------------- paramètres
 
-CODE_VERSION = 2.8
+CODE_VERSION = 3.0
 
 # presse
 INCR = 0.025               # mm par incrément de descente
@@ -201,6 +252,11 @@ PAUSE_DZ_EXIT = 0.005      # v2.8 : descente max du sommet par bloc de
 PAUSE_STABLE = 3           # v2.8 : blocs consécutifs de sommet stable exigés
 GUARD_EVERY = 20           # P2 : contrôle tous les N incréments
 VMAX_LIMIT = 0.25          # mm/ms = 4x la vitesse de descente de la plaque
+VMAX_EXPLODE = 5.0         # v2.9 : plafond dur en phase couchée — les
+                           # avalanches SOUS ce plafond sont le fluage
+                           # plastique (le mécanisme de densification),
+                           # on presse à travers ; au-dessus = explosion
+                           # (l'éjection réelle du 10000 : 16 mm/ms)
 MAX_PAUSES = 3             # P2 : abort si la dérive persiste ; v2.7 :
                            # DÉFAUT de --max-pauses. Après couchage, les
                            # cycles dérive-pause sont l'opération NORMALE
@@ -522,6 +578,34 @@ def _survey(client, fibers):
     return vmax, z_top
 
 
+def _hot_census(client, fibers, vmin=VPAUSE_EXIT):
+    """v3.0 : recensement du fluage — combien de fibres dépassent
+    vmin (vitesses relues à l'instant), vitesse de la pire et son
+    altitude, altitude moyenne de la population agitée. À appeler
+    APRÈS un _survey (les f["pos"] y sont rafraîchis). Un vmax
+    global peut pardonner : un fluage de surface (3 fibres, un
+    dépôt qui finit de tomber) et un fluage de fond (300 fibres,
+    moteur de correction sous charge) ne disent pas la même chose —
+    et le discriminateur est la TRAJECTOIRE de n_hot : il se vide
+    (consolidation qui fatigue) ou reste stationnaire (moteur
+    entretenu)."""
+    n_hot = 0
+    worst_v = 0.0
+    z_worst = 0.0
+    zs = []
+    for f in fibers:
+        lin, _ = p.getBaseVelocity(f["body"], physicsClientId=client)
+        vel = float(np.linalg.norm(lin))
+        if vel > vmin:
+            n_hot += 1
+            zs.append(f["pos"][2])
+        if vel > worst_v:
+            worst_v = vel
+            z_worst = f["pos"][2]
+    z_mean = float(np.mean(zs)) if zs else 0.0
+    return n_hot, worst_v, z_worst, z_mean
+
+
 def _pause_until_calm(client, fibers, verbose=True, blocks=PAUSE_MAX_BLOCKS,
                       z_plate=None):
     """v2.5 : pauses par blocs de PAUSE_STEPS pas re-contrôlés,
@@ -551,6 +635,12 @@ def _pause_until_calm(client, fibers, verbose=True, blocks=PAUSE_MAX_BLOCKS,
                          f"{PAUSE_DZ_EXIT*1e3:.0f} µm/bloc)")
             print(f"    pause plaque fixe : vmax={v:.3f} mm/ms, sommet "
                   f"z={z_top:.3f} mm ({crit})")
+            if z_plate is not None:      # v3.0 : recensement du fluage
+                n_hot, worst_v, z_worst, z_hot_mean = _hot_census(
+                    client, fibers)
+                print(f"      fluage : {n_hot} fibres > {VPAUSE_EXIT} "
+                      f"mm/ms ; pire {worst_v:.2f} mm/ms à z={z_worst:.3f}"
+                      f" ; z moyen des agitées {z_hot_mean:.3f} mm")
         if z_plate is None:
             if v < VPAUSE_EXIT:
                 return
@@ -612,7 +702,8 @@ def _settle_until_quiet(client, fibers, runs, min_steps, budget, label):
 def run_press(client, fibers, target, frict0, frict1, verbose=True,
               zero_g=False, damping=DAMPING, nips=1,
               pause_blocks=PAUSE_MAX_BLOCKS, max_pauses=MAX_PAUSES,
-              info=None):
+              info=None, couchage_damping=0.0,
+              vmax_explode=VMAX_EXPLODE):
     """Descente de plaque par incréments déplacés à CHAQUE PAS
     (v2.2). Rampe P1 sur toutes les fibres, gardes P2 tous les
     GUARD_EVERY incréments (v2.7 : chaque incrément après couchage).
@@ -644,7 +735,13 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
     SURFACE du mat, pas sur vmax — sous gravité, une fibre qui se
     dépose dans un pore a une vitesse terminale (~0,196 mm/ms)
     supérieure au seuil vmax : critère inatteignable (voir
-    _pause_until_calm).
+    _pause_until_calm). v2.9 : on PRESSE À TRAVERS le fluage — en
+    phase couchée, les avalanches sous le plafond dur ne déclenchent
+    PLUS de pause ; seules une évasion (fibre au-dessus de la
+    plaque) ou une explosion (vmax > vmax_explode) en déclenchent
+    une (critère surface v2.8). v3.0 : recensement du fluage dans
+    les pauses (_hot_census) et frein optionnel --couchage-damping
+    (défaut 0 : off).
 
     zero_g=True (route B) : presse en apesanteur (phase liquide), y
     compris les consolidations inter-nips ; v2.7 : apesanteur
@@ -666,7 +763,8 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
           f"sous {FINE_GAP*1e3:.0f} µm de la cible), {STEPS_PER_INCR} "
           f"pas/incr, rampe {frict0}->{frict1} "
           f"(rolling {ROLL_START}->{ROLL_END}), pauses {pause_blocks} "
-          f"x {PAUSE_STEPS} pas (max {max_pauses} épisodes)"
+          f"x {PAUSE_STEPS} pas (max {max_pauses} épisodes) "
+          f"[plafond couché {vmax_explode:.1f} mm/ms]"
           + ("  [APESANTEUR — phase liquide]" if zero_g else ""))
 
     prev_above = 0
@@ -718,43 +816,79 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
                           f"plaque z={z_now:.3f} mm  "
                           f"sommet tas z={z_top:.3f} mm  vmax={vmax:.3f} mm/ms  "
                           f"au-dessus={n_above}  ({time.perf_counter()-t0:.0f} s)")
-                # dérive = explosion (vmax) ou escalade de la plaque
-                drift = vmax > VMAX_LIMIT or n_above > prev_above
+                # ---- v2.7 : COUCHAGE à la 1re avalanche — le seuil
+                # vmax > VMAX_LIMIT ou une évasion signe la percolation
+                # du réseau : le mat devient autoporteur. La fiction
+                # zéro-g (v2.1) décrit un brouillard de fibres LIBRES ;
+                # ici il n'y a plus de tête de suspension à faire
+                # tomber (sommet = plaque, au-dessus = 0) : restaurer
+                # la gravité ne peut pas relancer la pluie balistique
+                # — et sans elle, un réseau jammé ne peut que
+                # dissiper, jamais se tasser. Les gardes passent à
+                # chaque incrément : une avalanche prise à 25 µm
+                # d'énergie stockée coûte des centaines de pas, pas
+                # des dizaines de milliers.
+                # v3.0 (v2.9) : ce déclenchement NE pause PAS — on
+                # presse À TRAVERS la transition (sinon on rejoue la
+                # pause de 20 h qui n'existe à aucun budget) ; le
+                # couchage ne sert qu'à restaurer la gravité et
+                # resserrer les gardes.
+                if not couchage and (vmax > VMAX_LIMIT
+                                     or n_above > prev_above):
+                    couchage = True
+                    z_couchage = z_now
+                    guard_every = 1
+                    if zero_g:
+                        p.setGravity(0, 0, GRAVITY,
+                                     physicsClientId=client)
+                        print(f"  COUCHAGE v2.7 : première avalanche à "
+                              f"plaque {z_now:.3f} mm — le réseau "
+                              f"percole, le mat est autoporteur ; "
+                              f"gravité restaurée pour le reste de la "
+                              f"presse, gardes à chaque incrément")
+                        if couchage_damping > 0.0:
+                            # v3.0 : frein OPTIONNEL — sous la
+                            # philosophie v2.9, les avalanches sont
+                            # le mécanisme de densification et ce
+                            # frein reste OFF par défaut ; à la
+                            # campagne, il tient les éjections hors
+                            # du plafond dur en tuant la vitesse
+                            # terminale de dépôt
+                            damping = couchage_damping
+                            tau = 1.0 / (-math.log(1.0 - damping))
+                            print(f"  v3.0 : damping couchage = "
+                                  f"{damping} — vitesse terminale "
+                                  f"de dépôt ~{abs(GRAVITY) * tau:.4f}"
+                                  f" mm/ms")
+                            for f in fibers:
+                                p.changeDynamics(
+                                    f["body"], -1,
+                                    linearDamping=damping,
+                                    angularDamping=damping,
+                                    physicsClientId=client)
+                    else:
+                        print(f"  v2.7 : première avalanche à plaque "
+                              f"{z_now:.3f} mm — gardes resserrées à "
+                              f"chaque incrément (gravité déjà "
+                              f"présente, route A)")
+                # ---- dérive -> pause (v2.9) : partout l'évasion de la
+                # plaque ; en phase diluée, vmax > VMAX_LIMIT ; en
+                # phase couchée, les avalanches sous le plafond dur
+                # SONT le fluage — seules une évasion ou une explosion
+                # stoppent
+                if couchage:
+                    drift = (vmax > vmax_explode
+                             or n_above > prev_above)
+                else:
+                    drift = vmax > VMAX_LIMIT or n_above > prev_above
                 if drift:
                     n_pauses += 1
                     total_pauses += 1
-                    print(f"  <-- DÉRIVE (vmax={vmax:.3f}, au-dessus "
-                          f"{prev_above}->{n_above}) : pause plaque fixe "
-                          f"({n_pauses}/{max_pauses})")
-                    # ---- v2.7 : COUCHAGE — la 1re dérive signe la
-                    # percolation du réseau : le mat devient autoporteur.
-                    # La fiction zéro-g (v2.1) décrit un brouillard de
-                    # fibres LIBRES ; ici il n'y a plus de tête de
-                    # suspension à faire tomber (sommet = plaque,
-                    # au-dessus = 0) : restaurer la gravité ne peut pas
-                    # relancer la pluie balistique — et sans elle, un
-                    # réseau jammé ne peut que dissiper, jamais se
-                    # tasser. Les gardes passent à chaque incrément :
-                    # une avalanche prise à 25 µm d'énergie stockée
-                    # coûte des centaines de pas, pas des dizaines de
-                    # milliers.
-                    if not couchage:
-                        couchage = True
-                        z_couchage = z_now
-                        guard_every = 1
-                        if zero_g:
-                            p.setGravity(0, 0, GRAVITY,
-                                         physicsClientId=client)
-                            print(f"  COUCHAGE v2.7 : première dérive à "
-                                  f"plaque {z_now:.3f} mm — le réseau "
-                                  f"percole, le mat est autoporteur ; "
-                                  f"gravité restaurée pour le reste de la "
-                                  f"presse, gardes à chaque incrément")
-                        else:
-                            print(f"  v2.7 : première dérive à plaque "
-                                  f"{z_now:.3f} mm — gardes resserrées à "
-                                  f"chaque incrément (gravité déjà "
-                                  f"présente, route A)")
+                    cause = ("évasion" if n_above > prev_above
+                             else "explosion")
+                    print(f"  <-- DÉRIVE ({cause}, vmax={vmax:.3f}, "
+                          f"au-dessus {prev_above}->{n_above}) : "
+                          f"pause plaque fixe ({n_pauses}/{max_pauses})")
                     if n_pauses >= max_pauses:
                         raise RuntimeError(
                             "presse divergente : la dérive persiste après "
@@ -775,11 +909,15 @@ def run_press(client, fibers, target, frict0, frict1, verbose=True,
             _settle_until_quiet(client, fibers, runs=2, min_steps=500,
                                 budget=NIP_BUDGET, label="consolidation nip")
 
-    # ---- v2.5 : PORTE DE FIN DE PRESSE — pas d'export d'un mat explosé
+    # ---- PORTE DE FIN DE PRESSE — pas d'export d'un mat explosé
+    # (v2.9 : en phase couchée, le plafond dur gouverne — le fluage
+    # sous VMAX_EXPLODE n'est plus une condition d'arrêt)
     vmax, _ = _survey(client, fibers)
-    if vmax > VMAX_LIMIT:
-        print(f"  <-- éclat en fin de presse (vmax={vmax:.3f} mm/ms) : "
-              f"détente avant consolidation, export refusé si non résorbé")
+    vmax_gate = vmax_explode if couchage else VMAX_LIMIT
+    if vmax > vmax_gate:
+        print(f"  <-- agitation en fin de presse (vmax={vmax:.3f} > "
+              f"{vmax_gate:.1f} mm/ms) : pause critère surface avant "
+              f"consolidation")
         _pause_until_calm(client, fibers, verbose, blocks=pause_blocks,
                           z_plate=z_now)
 
@@ -841,9 +979,20 @@ def main():
                          "en phase dense)")
     ap.add_argument("--max-pauses", type=int, default=MAX_PAUSES,
                     help=f"v2.7 : épisodes de dérive consécutifs avant "
-                         f"abort (défaut {MAX_PAUSES}) ; après couchage, "
-                         "une avalanche = une pause, c'est l'opération "
-                         "normale : 50 en campagne")
+                         f"abort (défaut {MAX_PAUSES}) ; v2.9 : sous "
+                         "couchage ils ne tombent que sur évasion ou "
+                         "explosion : 50 en campagne")
+    ap.add_argument("--couchage-damping", type=float, default=0.0,
+                    help="v3.0 : frein optionnel au couchage (0 = off). "
+                         "Sous la philosophie v2.9, les avalanches SONT "
+                         "le mécanisme : à n'activer que si le plafond "
+                         "dur devient trop fréquent en campagne "
+                         "(0.7 fait tomber v_t de 0,196 a ~0,008 mm/ms)")
+    ap.add_argument("--vmax-explode", type=float, default=VMAX_EXPLODE,
+                    help="v2.9 : plafond dur en phase couchée (mm/ms) ; "
+                         f"les avalanches sous ce plafond sont le fluage "
+                         f"plastique ; au-delà ou évasion = pause puis "
+                         f"abort (défaut {VMAX_EXPLODE})")
     ap.add_argument("--out", default=None, help="fichier de sortie")
     args = ap.parse_args()
 
@@ -860,6 +1009,10 @@ def main():
         ap.error("--pause-blocks >= 1")
     if args.max_pauses < 1:
         ap.error("--max-pauses >= 1")
+    if not (0.0 <= args.couchage_damping < 1.0):
+        ap.error("--couchage-damping dans [0, 1[")
+    if args.vmax_explode <= 0.0:
+        ap.error("--vmax-explode > 0")
 
     client = p.connect(p.DIRECT)
     p.setGravity(0, 0, GRAVITY, physicsClientId=client)  # mm/ms²
@@ -960,7 +1113,9 @@ def main():
     run_press(client, fibers, args.target, args.frict0, args.frict1,
               zero_g=zero_g, damping=LIQUID_DAMPING if zero_g else DAMPING,
               nips=args.nips, pause_blocks=args.pause_blocks,
-              max_pauses=args.max_pauses, info=info)
+              max_pauses=args.max_pauses, info=info,
+              couchage_damping=args.couchage_damping,
+              vmax_explode=args.vmax_explode)
 
     # ----------------------------- export -----------------------------
     _survey(client, fibers)          # dernier état : pos/dir à jour
@@ -985,6 +1140,8 @@ def main():
               pause_blocks=args.pause_blocks, max_pauses=args.max_pauses,
               couchage=bool(info.get("couchage", False)),
               couchage_z=info.get("couchage_z"),
+              couchage_damping=args.couchage_damping,
+              vmax_explode=args.vmax_explode,
               frict0=args.frict0, frict1=args.frict1,
               walls=walls_built, escaped=escaped, source=source)
 
