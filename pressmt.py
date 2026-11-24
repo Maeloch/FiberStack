@@ -1,6 +1,12 @@
 """
 pressMT.py — presse MULTI-PROCESSUS par tuiles (v1.6, route B).
 
+v1.6.1 : os.makedirs(outdir) — l'échec du mini_ctrl (24/11) n'était
+pas de la physique : 1,7 h de presse entièrement VERTES (aucune
+pause, census jamais sollicité, vmax max 0.271 à φ 19 %) perdues sur
+FileNotFoundError, 'mini_ctrl/' n'existait pas. Toujours mkdir le
+outdir, quelle que soit la confiance.
+
 v1.6 : plomberie --couchage-damping et --vmax-explode (press v3.0)
 + ÉCONOMIE DE PILOTE. La leçon du 14-16/11 : chaque pilote 4750
 coûte 32 h et n'apporte qu'un verdict ; la transition du couchage
@@ -478,6 +484,13 @@ def main():
         raise SystemExit("--couchage-damping dans [0, 1[")
     if args.vmax_explode <= 0.0:
         raise SystemExit("--vmax-explode > 0")
+
+    # v1.6.1 : le outdir n'est pas créé (leçon du mini_ctrl : 1,7 h de
+    # presse VERTES perdues à FileNotFoundError parce que le dossier
+    # n'existait pas) — press.py n'a pas le problème (export à côté
+    # du npz d'entrée), un outdir arbitraire est la destinée normale
+    # d'une campagne multi-tuiles
+    os.makedirs(args.outdir, exist_ok=True)
 
     n_tiles = args.nx * args.ny
     n_tile = args.random // n_tiles
